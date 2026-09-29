@@ -2,7 +2,7 @@
 
 import { INITIAL_MOCK_DATA } from './mock-data';
 
-const STORAGE_KEY = 'CRM_MOCK_DATABASE_V2';
+const STORAGE_KEY = 'CRM_MOCK_DATABASE_V3';
 
 type StoreType = Record<string, Record<string, any>>;
 
@@ -20,6 +20,11 @@ class MockDatabase {
 
     if (typeof window !== 'undefined') {
       try {
+        // Purge legacy storage keys so old mock data is never read
+        localStorage.removeItem('CRM_MOCK_DATABASE_V1');
+        localStorage.removeItem('CRM_MOCK_DATABASE_V2');
+        localStorage.removeItem('demo_mock_db');
+
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) {
           this.store = JSON.parse(saved);
