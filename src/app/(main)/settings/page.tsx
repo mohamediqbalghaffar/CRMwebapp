@@ -293,10 +293,10 @@ function DataManagement() {
         try {
             const workbook = XLSX.utils.book_new();
             const templateCollections = {
-                products: [{ productName: "Sample Product", category: "Mattress", sizeModel: "King", stockLocation: "Warehouse", currentQuantity: 10, sellingPrice: 500, unitPrice: 300 }],
-                customers: [{ customerName: "Sample Customer", customerPhoneNumber: "07701234567", customerAddress: "Suli" }],
-                suppliers: [{ supplierName: "Sample Supplier", contactInformation: "07501234567" }],
-                expenses: [{ name: "Sample Expense", date: new Date().toISOString().split('T')[0], amount: 100, currency: "USD", category: "Daily", note: "Misc" }],
+                products: [{ productName: "دۆشەکی نموونەیی (Sample)", category: "Mattress", sizeModel: "180*200", stockLocation: "Warehouse", currentQuantity: 10, sellingPrice: 500, unitPrice: 300 }],
+                customers: [{ customerName: "کڕیاری نموونەیی (دێمۆ)", customerPhoneNumber: "07700000000", customerAddress: "سلێمانی (دێمۆ)" }],
+                suppliers: [{ supplierName: "دابینکەری نموونەیی (دێمۆ)", contactInformation: "07500000000" }],
+                expenses: [{ name: "خەرجی نموونەیی", date: new Date().toISOString().split('T')[0], amount: 100, currency: "USD", category: "Daily", note: "Misc" }],
             };
             
             for (const [sheetName, data] of Object.entries(templateCollections)) {

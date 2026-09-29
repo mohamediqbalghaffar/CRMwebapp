@@ -686,7 +686,7 @@ export default function TutorialPage() {
                             </div>
                             <CardContent className="p-4 space-y-4">
                                 <div className="space-y-2">
-                                    <Label className="text-[10px]">کڕیار: کۆسار سلێمانی</Label>
+                                    <Label className="text-[10px]">کڕیار: کڕیاری نموونەیی (دێمۆ)</Label>
                                     <div className="p-3 bg-muted/20 border rounded-xl space-y-2 text-xs">
                                         <div className="flex justify-between font-semibold">
                                             <span>ناوی کاڵا</span>
@@ -935,8 +935,8 @@ export default function TutorialPage() {
                                 <div className="border rounded-xl p-3 space-y-3 bg-muted/10 relative">
                                     <div className="flex justify-between items-start">
                                         <div>
-                                            <h5 className="font-bold text-xs">کۆسار عەلی</h5>
-                                            <span className="text-[9px] text-muted-foreground">تەلەفۆن: 07701234567</span>
+                                            <h5 className="font-bold text-xs">کڕیاری نموونەیی (دێمۆ)</h5>
+                                            <span className="text-[9px] text-muted-foreground">تەلەفۆن: 07700000000</span>
                                         </div>
                                         <Badge className="text-[9px] bg-rose-500/20 text-rose-400 border-none font-semibold">بڕی قەرزدار</Badge>
                                     </div>
@@ -986,8 +986,8 @@ export default function TutorialPage() {
                                 <div className="border rounded-xl p-3 space-y-3 bg-muted/10">
                                     <div className="flex justify-between items-start">
                                         <div>
-                                            <h5 className="font-bold text-xs">کۆمپانیای ڕووناکی دۆشەک</h5>
-                                            <span className="text-[9px] text-muted-foreground">ناونیشان: هەولێر، جادەی کەرکوک</span>
+                                            <h5 className="font-bold text-xs">کۆمپانیای بازرگانی ئەڵماس (دێمۆ)</h5>
+                                            <span className="text-[9px] text-muted-foreground">ناونیشان: هەولێر - ناوچەی بازرگانی (دێمۆ)</span>
                                         </div>
                                         <Badge className="text-[9px] bg-indigo-500/20 text-indigo-400 border-none font-semibold">هاوردەکەر</Badge>
                                     </div>
