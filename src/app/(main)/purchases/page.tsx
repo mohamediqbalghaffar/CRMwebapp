@@ -1,0 +1,626 @@
+'use client';
+
+import React, { useState, useMemo, useRef, use } from 'react';
+import { PageHeader } from "@/components/shared/page-header";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { PlusCircle, Loader2, Trash2, FileSpreadsheet, Edit, FileUp, FileDown, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { BuyingForm } from "./components/buying-form";
+import { useFirestore, useCollection, useMemoFirebase, collection, runTransaction, doc, getDocs, deleteDoc } from '@/firebase';
+import { WithId } from '@/firebase/firestore/use-collection';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
+import { useToast } from '@/hooks/use-toast';
+import { PurchaseDetails } from './components/purchase-details';
+import * as XLSX from 'xlsx';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { analyzePurchaseExcel } from '@/ai/flows/analyze-purchase-excel';
+import { ConfidentialBlur } from '@/components/shared/confidential-blur';
+import { ScrollArea } from '@/components/ui/scroll-area';
+
+type BuyingFormType = {
+    supplierId: string;
+    issueDate: string;
+    customsFee?: number;
+    totalAmount?: number;
+};
+
+type Supplier = {
+    supplierName: string;
+};
+
+type BuyingFormProduct = {
+    productId: string;
+    quantity: number;
+    unitPrice: number;
+};
+
+type ProductDefinition = {
+    productName: string;
+    sellingPrice?: number;
+    category: 'Mattress' | 'Bed' | 'Pillow' | 'Cover';
+};
+
+function PurchaseFormDialog({ formId, onSave, trigger, initialItems }: { formId: string | null, onSave: () => void, trigger: React.ReactNode, initialItems?: any[] }) {
+    const [open, setOpen] = useState(false);
+
+    return (
+        <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>{trigger}</DialogTrigger>
+            <DialogContent className="sm:max-w-4xl max-h-[95vh] sm:max-h-[90vh] overflow-hidden" dir="rtl">
+                <DialogHeader>
+                    <DialogTitle>{formId ? 'دەستکاریکردنی پسوولەی کڕین' : 'دروستکردنی پسوولەی کڕین'}</DialogTitle>
+                    <DialogDescription>
+                        {formId ? 'زانیارییەکانی پسوولەکە نوێ بکەرەوە.' : 'زانیارییەکانی پسوولەیەکی نوێی کڕین بنووسە.'}
+                    </DialogDescription>
+                </DialogHeader>
+                <div className="max-h-[80vh] overflow-y-auto p-2 sm:p-4">
+                    <BuyingForm formId={formId} onSave={() => { onSave(); setOpen(false); }} initialItems={initialItems} />
+                </div>
+            </DialogContent>
+        </Dialog>
+    );
+}
+
+function ImportActions({ onSave }: { onSave: () => void }) {
+    const [isProcessing, setIsProcessing] = useState(false);
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const [initialItems, setInitialItems] = useState<any[] | undefined>(undefined);
+    const [importType, setImportType] = useState<'ai' | 'standard' | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const { toast } = useToast();
+    const firestore = useFirestore();
+
+    const productDefinitionsQuery = useMemoFirebase(() => {
+        if (!firestore) return null;
+        return collection(firestore, 'product_definitions');
+    }, [firestore]);
+    const { data: allProductDefinitions } = useCollection<ProductDefinition>(productDefinitionsQuery);
+
+    const triggerUpload = (type: 'ai' | 'standard') => {
+        setImportType(type);
+        fileInputRef.current?.click();
+    };
+
+    const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        setIsProcessing(true);
+        toast({ title: `...شیکردنەوەی فایل (${importType === 'ai' ? 'AI' : 'ستاندارد'})` });
+
+        try {
+            if (importType === 'ai') {
+                await handleAiImport(file);
+            } else {
+                await handleStandardImport(file);
+            }
+        } catch (error: any) {
+             console.error("Import failed:", error);
+             toast({ variant: 'destructive', title: "هاوردەکردن سەرکەوتوو نەبوو", description: error.message });
+        } finally {
+            setIsProcessing(false);
+            if (fileInputRef.current) {
+                fileInputRef.current.value = "";
+            }
+        }
+    };
+    
+    const handleAiImport = async (file: File) => {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const data = e.target?.result;
+            if (!data) {
+                toast({ variant: 'destructive', title: "هەڵە لە خوێندنەوەی فایل" });
+                return;
+            }
+
+            try {
+                const workbook = XLSX.read(data, { type: 'array' });
+                const sheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[sheetName];
+                const csvString = XLSX.utils.sheet_to_csv(worksheet);
+
+                if (!csvString) {
+                    toast({ variant: 'destructive', title: "فایل بەتاڵە", description: "نەتوانرا هیچ داتایەک لە فایلەکە بخوێنرێتەوە." });
+                    return;
+                }
+
+                const existingProductNames = allProductDefinitions?.map(p => p.productName) || [];
+                const result = await analyzePurchaseExcel({ purchaseDataAsCsv: csvString, existingProductNames });
+                
+                if (result && result.length > 0) {
+                    setInitialItems(result);
+                    setDialogOpen(true);
+                } else {
+                    toast({ variant: 'destructive', title: "هیچ کاڵایەک نەدۆزرایەوە", description: "AI نەیتوانی هیچ کاڵایەک لەم فایلە دەربهێنێت." });
+                }
+            } catch (aiError: any) {
+                console.error("AI analysis failed:", aiError);
+                 if (aiError.message && (aiError.message.includes('429') || aiError.message.includes('503'))) {
+                    toast({ variant: 'destructive', title: "خزمەتگوزاری سەرقاڵە", description: "بەکارهێنانی API زیاد لە سنووری خۆی تێپەڕاندووە یان کاتییە لەکارکەوتووە. تکایە دواتر هەوڵبدەرەوە." });
+                 } else {
+                    toast({ variant: 'destructive', title: "هەڵە لە شیکردنەوەی AI", description: aiError.message || "AI نەیتوانی داتاکان دەربهێنێت." });
+                 }
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+
+    const handleStandardImport = async (file: File) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const data = e.target?.result;
+            if (!data) return;
+            
+            const workbook = XLSX.read(data, { type: 'array' });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            
+            const headers: string[] = [];
+            const range = XLSX.utils.decode_range(worksheet['!ref']!);
+            for (let C = range.s.c; C <= range.e.c; ++C) {
+                const cell = worksheet[XLSX.utils.encode_cell({ c: C, r: range.s.r })];
+                const headerText = cell ? String(cell.v).trim() : `UNKNOWN_${C}`;
+                headers[C] = headerText;
+            }
+
+            const findHeaderIndex = (possibleNames: string[]): number => {
+                for (const name of possibleNames) {
+                    const index = headers.findIndex(h => h.trim() === name);
+                    if (index !== -1) return index;
+                }
+                 for (const name of possibleNames) {
+                    const index = headers.findIndex(h => h.includes(name));
+                    if (index !== -1) return index;
+                }
+                return -1;
+            };
+
+            const nameIdx = findHeaderIndex(['ناوی کاڵا', 'ناو']);
+            const purchasePriceIdx = findHeaderIndex(['نرخی کڕین', 'نرخی کرین']);
+            const qtyIdx = findHeaderIndex(['دانە', 'دانه']);
+            const sellingPriceIdx = findHeaderIndex(['نرخی فرۆشتنی تاک', 'نرخی فرۆشتن']);
+
+
+            if (nameIdx === -1) {
+                toast({ variant: 'destructive', title: "ستوونی پێویست نەدۆزرایەوە", description: "پێویستە فایلەکە ستوونی 'ناو' یان 'ناوی کاڵا'ی تێدابێت." });
+                return;
+            }
+
+            const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" }).slice(1) as any[][];
+            
+            const newItems = jsonData.map(row => {
+                const productNameFromSheet = String(row[nameIdx] || '').trim();
+                if (!productNameFromSheet) return null;
+
+                let bestMatch: ProductDefinition | undefined;
+                let longestMatchLength = 0;
+
+                if (allProductDefinitions) {
+                    for (const def of allProductDefinitions) {
+                        if (productNameFromSheet.toLowerCase().includes(def.productName.toLowerCase().trim())) {
+                            if (def.productName.length > longestMatchLength) {
+                                bestMatch = def;
+                                longestMatchLength = def.productName.length;
+                            }
+                        }
+                    }
+                }
+                
+                const existingDef = bestMatch;
+
+                return {
+                    product: existingDef ? existingDef.productName : productNameFromSheet,
+                    quantity: Number(row[qtyIdx] || 1),
+                    unitPrice: Number(row[purchasePriceIdx] || 0),
+                    sellingPrice: Number(row[sellingPriceIdx] || (existingDef?.sellingPrice || 0)),
+                    category: existingDef ? existingDef.category : 'Mattress',
+                    sizeModel: '',
+                };
+            }).filter((item): item is NonNullable<typeof item> => item !== null);
+
+
+            if (newItems.length > 0) {
+                setInitialItems(newItems);
+                setDialogOpen(true);
+            } else {
+                toast({ variant: 'default', title: "هیچ کاڵایەک نەدۆزرایەوە", description: "هیچ کاڵایەکی گونجاو لە فایلەکەدا نەبوو بۆ هاوردەکردنی." });
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+
+    const downloadTemplate = () => {
+        try {
+            const sampleData = [{"ناوی کاڵا": "دۆشەکی نموونە", "دانە": 10, "نرخی کڕین": 150, "نرخی فرۆشتن": 250 }];
+            const worksheet = XLSX.utils.json_to_sheet(sampleData);
+            worksheet['!cols'] = [ { wch: 25 }, { wch: 10 }, { wch: 15 }, { wch: 15 } ];
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Purchase Template");
+            XLSX.writeFile(workbook, "Purchase_Import_Template.xlsx");
+            toast({ title: "سەرکەوتوو بوو", description: "فایلی نموونەی کڕین بە سەرکەوتوویی دابەزێنرا.", className: "bg-accent text-accent-foreground" });
+        } catch (error) {
+            toast({ variant: 'destructive', title: "هەڵەیەک ڕوویدا", description: "دابەزاندنی فایلی نموونە سەرکەوتوو نەبوو." });
+        }
+    };
+
+    return (
+        <>
+            <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".xlsx, .xls"/>
+             <div className="flex items-center gap-2">
+                <PurchaseFormDialog formId={null} onSave={onSave} trigger={
+                    <Button><PlusCircle />پسوولەی کڕینی نوێ</Button>
+                }/>
+                {/* M-03: Secondary actions in dropdown on mobile */}
+                <div className="hidden md:flex items-center gap-2">
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="outline" disabled={isProcessing}>
+                                {isProcessing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileUp className="mr-2 h-4 w-4" />}
+                                هاوردەکردنی پسوولە
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent>
+                            <DropdownMenuItem onSelect={() => triggerUpload('ai')}>هاوردەکردنی زیرەک (AI)</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => triggerUpload('standard')}>هاوردەکردنی ستاندارد</DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                    <Button onClick={downloadTemplate} variant="outline"><FileDown className="mr-2 h-4 w-4" />دابەزاندنی نموونە</Button>
+                </div>
+                <div className="md:hidden">
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="icon"><FileUp className="h-4 w-4" /></Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                            <DropdownMenuItem onSelect={() => triggerUpload('ai')}>هاوردەکردنی زیرەک (AI)</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => triggerUpload('standard')}>هاوردەکردنی ستاندارد</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={downloadTemplate}>دابەزاندنی نموونە</DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                </div>
+             </div>
+
+            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                <DialogContent className="sm:max-w-4xl max-h-[95vh] sm:max-h-[90vh] overflow-hidden" dir="rtl">
+                    <DialogHeader>
+                        <DialogTitle>دروستکردنی پسوولەی کڕین لە فایل</DialogTitle>
+                        <DialogDescription>وردبینی زانیارییەکان بکە و دابینکەر هەڵبژێرە، پاشان پاشەکەوتی بکە.</DialogDescription>
+                    </DialogHeader>
+                    <div className="max-h-[80vh] overflow-y-auto p-2">
+                        <BuyingForm formId={null} onSave={() => { onSave(); setDialogOpen(false); }} initialItems={initialItems} />
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </>
+    );
+}
+
+function PurchasesList() {
+    const firestore = useFirestore();
+    const { toast } = useToast();
+    const [refreshKey, setRefreshKey] = useState(0);
+    const [sortConfig, setSortConfig] = useState<{ key: 'issueDate' | 'supplierName' | 'totalAmount', direction: 'asc' | 'desc' } | null>({ key: 'issueDate', direction: 'desc' });
+    const [filterSupplier, setFilterSupplier] = useState<string>('all');
+
+    const buyingFormsQuery = useMemoFirebase(() => {
+        if (!firestore) return null;
+        return collection(firestore, 'buying_forms');
+    }, [firestore, refreshKey]);
+
+    const suppliersQuery = useMemoFirebase(() => {
+        if (!firestore) return null;
+        return collection(firestore, 'suppliers');
+    }, [firestore]);
+
+    const { data: buyingForms, isLoading: isLoadingForms } = useCollection<BuyingFormType>(buyingFormsQuery);
+    const { data: suppliers, isLoading: isLoadingSuppliers } = useCollection<Supplier>(suppliersQuery);
+
+    const handleFormSave = () => {
+        setRefreshKey(prev => prev + 1);
+    };
+
+    const enrichedForms = useMemo(() => {
+        if (!buyingForms || !suppliers) return [];
+        const supplierMap = new Map(suppliers.map(s => [s.id, s.supplierName]));
+        
+        let filtered = buyingForms.map(form => ({
+            ...form,
+            supplierName: supplierMap.get(form.supplierId) || 'دابینکەری نەزانراو',
+            totalAmount: form.totalAmount || 0,
+        }));
+
+        if (filterSupplier !== 'all') {
+            filtered = filtered.filter(f => f.supplierId === filterSupplier);
+        }
+
+        if (sortConfig) {
+            filtered.sort((a, b) => {
+                let aVal = a[sortConfig.key];
+                let bVal = b[sortConfig.key];
+                
+                if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+                if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+                return 0;
+            });
+        }
+        
+        return filtered;
+    }, [buyingForms, suppliers, filterSupplier, sortConfig]);
+
+    const handleSort = (key: 'issueDate' | 'supplierName' | 'totalAmount') => {
+        setSortConfig(current => {
+            if (current && current.key === key) {
+                return { key, direction: current.direction === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, direction: 'desc' };
+        });
+    };
+
+    const getSortIcon = (key: string) => {
+        if (sortConfig?.key === key) {
+            return sortConfig.direction === 'asc' ? <ArrowUp className="h-4 w-4 ml-1" /> : <ArrowDown className="h-4 w-4 ml-1" />;
+        }
+        return <ArrowUpDown className="h-4 w-4 ml-1 opacity-50" />;
+    };
+
+    const handleDelete = async (formId: string) => {
+        if (!firestore) return;
+
+        try {
+            // D-10: Fetch subcollection IDs OUTSIDE the transaction
+            const productsPurchasedRef = collection(firestore, `buying_forms/${formId}/buying_form_products`);
+            const productsPurchasedSnapshot = await getDocs(productsPurchasedRef);
+            const purchasedItems = productsPurchasedSnapshot.docs.map(d => ({ ref: d.ref, ...(d.data() as BuyingFormProduct) }));
+
+            await runTransaction(firestore, async (transaction) => {
+                const productRefsToUpdate: { ref: any; newQuantity: number }[] = [];
+                // D-10: Use transaction.get for each product (transaction-safe reads)
+                const productSnapshots = await Promise.all(
+                    purchasedItems.map(item => {
+                        const productRef = doc(firestore, 'products', item.productId);
+                        return transaction.get(productRef).then(snap => ({ snap, item }));
+                    })
+                );
+
+                for (const { snap, item } of productSnapshots) {
+                     if (snap.exists()) {
+                        const newQuantity = (snap.data()!.currentQuantity || 0) - item.quantity;
+                        productRefsToUpdate.push({ ref: snap.ref, newQuantity: newQuantity < 0 ? 0 : newQuantity });
+                    }
+                }
+
+                productRefsToUpdate.forEach(({ ref, newQuantity }) => {
+                    transaction.update(ref, { currentQuantity: newQuantity });
+                });
+                
+                // Delete subcollection docs
+                purchasedItems.forEach(item => {
+                    transaction.delete(item.ref);
+                });
+
+                const formRef = doc(firestore, 'buying_forms', formId);
+                transaction.delete(formRef);
+            });
+
+            toast({
+                title: "سەرکەوتوو بوو",
+                description: "پسوولەی کڕین بە سەرکەوتوویی سڕایەوە و بڕی کاڵاکان لە کۆگا کەمکرایەوە.",
+                className: "bg-accent text-accent-foreground",
+            });
+            handleFormSave();
+        } catch (error: any) {
+            console.error("Error deleting purchase form:", error);
+            toast({
+                variant: 'destructive',
+                title: "هەڵەیەک ڕوویدا",
+                description: error.message || "سڕینەوەی پسوولەی کڕین سەرکەوتوو نەبوو.",
+            });
+        }
+    };
+
+
+    const isLoading = isLoadingForms || isLoadingSuppliers;
+
+    return (
+         <Card>
+            <CardHeader className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <CardTitle>لیستی کڕینەکان</CardTitle>
+                <div className="w-full sm:w-auto flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground whitespace-nowrap">دابینکەر:</span>
+                    <Select value={filterSupplier} onValueChange={setFilterSupplier} dir="rtl">
+                        <SelectTrigger className="w-[180px]">
+                            <SelectValue placeholder="هەموو دابینکەرەکان" />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="all">هەموو دابینکەرەکان</SelectItem>
+                            {suppliers?.map(s => (
+                                <SelectItem key={s.id} value={s.id}>{s.supplierName}</SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                </div>
+            </CardHeader>
+            <CardContent>
+                <ScrollArea className="h-[60vh]">
+                    <Table className="hidden md:table">
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead className="text-left w-[120px]">کردارەکان</TableHead>
+                                <TableHead className="text-right">
+                                    <Button variant="ghost" onClick={() => handleSort('totalAmount')} className="flex items-center gap-1 hover:bg-transparent px-0 font-semibold text-muted-foreground">
+                                        کۆی گشتی
+                                        {getSortIcon('totalAmount')}
+                                    </Button>
+                                </TableHead>
+                                <TableHead className="text-right">
+                                    <Button variant="ghost" onClick={() => handleSort('issueDate')} className="flex items-center gap-1 hover:bg-transparent px-0 font-semibold text-muted-foreground">
+                                        بەروار
+                                        {getSortIcon('issueDate')}
+                                    </Button>
+                                </TableHead>
+                                <TableHead className="text-right">
+                                    <Button variant="ghost" onClick={() => handleSort('supplierName')} className="flex items-center gap-1 hover:bg-transparent px-0 font-semibold text-muted-foreground">
+                                        دابینکەر
+                                        {getSortIcon('supplierName')}
+                                    </Button>
+                                </TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {isLoading ? (
+                                <TableRow>
+                                    <TableCell colSpan={4} className="h-24 text-center">
+                                        <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+                                    </TableCell>
+                                </TableRow>
+                            ) : enrichedForms.length === 0 ? (
+                                <TableRow>
+                                    <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">هیچ کڕینێک تۆمار نەکراوە.</TableCell>
+                                </TableRow>
+                            ) : (
+                                enrichedForms.map((form) => (
+                                <TableRow key={form.id}>
+                                    <TableCell className="text-left">
+                                        <div className="flex items-center justify-start gap-2">
+                                            <AlertDialog>
+                                                <AlertDialogTrigger asChild>
+                                                    <Button variant="ghost" size="icon">
+                                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                                    </Button>
+                                                </AlertDialogTrigger>
+                                                <AlertDialogContent dir="rtl">
+                                                    <AlertDialogHeader>
+                                                    <AlertDialogTitle>دڵنیایت لە سڕینەوەی ئەم پسوولەیە؟</AlertDialogTitle>
+                                                    <AlertDialogDescription>
+                                                        ئەم کردارە پاشگەزبوونەوەی نییە. کاڵاکان لە کۆگا کەم دەکرێنەوە و پسوولەکە بە هەمیشەیی دەسڕێتەوە.
+                                                    </AlertDialogDescription>
+                                                    </AlertDialogHeader>
+                                                    <AlertDialogFooter>
+                                                    <AlertDialogCancel>پاشگەزبوونەوە</AlertDialogCancel>
+                                                    <AlertDialogAction onClick={() => handleDelete(form.id)} className="bg-destructive hover:bg-destructive/90">
+                                                        بەڵێ، بسڕەوە
+                                                    </AlertDialogAction>
+                                                    </AlertDialogFooter>
+                                                </AlertDialogContent>
+                                            </AlertDialog>
+
+                                            <PurchaseFormDialog 
+                                                formId={form.id} 
+                                                onSave={handleFormSave}
+                                                trigger={
+                                                    <Button variant="ghost" size="icon">
+                                                        <Edit className="h-4 w-4 text-blue-500" />
+                                                    </Button>
+                                                }
+                                            />
+
+                                            <Dialog>
+                                                <DialogTrigger asChild>
+                                                    <Button variant="ghost" size="icon">
+                                                        <FileSpreadsheet className="h-4 w-4" />
+                                                    </Button>
+                                                </DialogTrigger>
+                                                <DialogContent className="sm:max-w-2xl" dir="rtl">
+                                                    <DialogHeader>
+                                                        <DialogTitle>وردەکارییەکانی پسوولەی کڕین</DialogTitle>
+                                                    </DialogHeader>
+                                                    <PurchaseDetails formId={form.id} />
+                                                </DialogContent>
+                                            </Dialog>
+                                        </div>
+                                    </TableCell>
+                                    <TableCell className="text-right">
+                                        <Badge variant="secondary">
+                                          <ConfidentialBlur>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(form.totalAmount || 0)}</ConfidentialBlur>
+                                        </Badge>
+                                    </TableCell>
+                                    <TableCell className="text-right">{form.issueDate}</TableCell>
+                                    <TableCell className="font-medium text-right">{form.supplierName}</TableCell>
+                                </TableRow>
+                            )))}
+                        </TableBody>
+                    </Table>
+                    <div className="space-y-4 md:hidden">
+                        {isLoading ? (
+                            <div className="flex justify-center items-center h-48"><Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" /></div>
+                        ) : enrichedForms.length === 0 ? (
+                            <div className="py-8 text-center text-muted-foreground">هیچ کڕینێک تۆمار نەکراوە.</div>
+                        ) : (
+                            enrichedForms.map((form) => (
+                                <Card key={form.id}>
+                                    <CardHeader>
+                                        <CardTitle>{form.supplierName}</CardTitle>
+                                        <CardDescription>{form.issueDate}</CardDescription>
+                                    </CardHeader>
+                                    <CardContent>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-muted-foreground">کۆی گشتی:</span>
+                                            <Badge variant="secondary">
+                                                <ConfidentialBlur>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(form.totalAmount || 0)}</ConfidentialBlur>
+                                            </Badge>
+                                        </div>
+                                    </CardContent>
+                                    <CardFooter className="flex justify-end gap-2">
+                                        <AlertDialog>
+                                            <AlertDialogTrigger asChild><Button variant="ghost" size="sm"><Trash2 className="h-4 w-4 mr-2 text-destructive" />سڕینەوە</Button></AlertDialogTrigger>
+                                            <AlertDialogContent dir="rtl">
+                                                <AlertDialogHeader>
+                                                    <AlertDialogTitle>دڵنیایت لە سڕینەوەی ئەم پسوولەیە؟</AlertDialogTitle>
+                                                    <AlertDialogDescription>ئەم کردارە پاشگەزبوونەوەی نییە. کاڵاکان لە کۆگا کەم دەکرێنەوە و پسوولەکە بە هەمیشەیی دەسڕێتەوە.</AlertDialogDescription>
+                                                </AlertDialogHeader>
+                                                <AlertDialogFooter>
+                                                    <AlertDialogCancel>پاشگەزبوونەوە</AlertDialogCancel>
+                                                    <AlertDialogAction onClick={() => handleDelete(form.id)} className="bg-destructive hover:bg-destructive/90">بەڵێ، بسڕەوە</AlertDialogAction>
+                                                </AlertDialogFooter>
+                                            </AlertDialogContent>
+                                        </AlertDialog>
+                                        <PurchaseFormDialog formId={form.id} onSave={handleFormSave} trigger={<Button variant="ghost" size="sm"><Edit className="h-4 w-4 mr-2 text-blue-500" />دەستکاری</Button>} />
+                                        <Dialog>
+                                            <DialogTrigger asChild><Button variant="ghost" size="sm"><FileSpreadsheet className="h-4 w-4 mr-2" />وردەکاری</Button></DialogTrigger>
+                                            <DialogContent className="sm:max-w-2xl" dir="rtl">
+                                                <DialogHeader><DialogTitle>وردەکارییەکانی پسوولەی کڕین</DialogTitle></DialogHeader>
+                                                <PurchaseDetails formId={form.id} />
+                                            </DialogContent>
+                                        </Dialog>
+                                    </CardFooter>
+                                </Card>
+                            ))
+                        )}
+                    </div>
+                </ScrollArea>
+            </CardContent>
+        </Card>
+    );
+}
+
+
+export default function PurchasesPage({ params, searchParams }: { params: Promise<any>, searchParams: Promise<any> }) {
+    use(params);
+    use(searchParams);
+    const [refreshKey, setRefreshKey] = useState(0);
+    const handleSave = () => setRefreshKey(prev => prev + 1);
+
+    return (
+        <div className="p-4 md:p-8 space-y-8" dir="rtl">
+            <PageHeader title="بەڕێوەبردنی کڕینەکان" description="تۆماری پسوولەکانی کڕین لێرە ببینە و زیاد بکە.">
+                <ImportActions onSave={handleSave} />
+            </PageHeader>
+            <PurchasesList />
+        </div>
+    );
+}

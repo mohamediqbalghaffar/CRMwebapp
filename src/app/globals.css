@@ -1,0 +1,167 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 215 28% 17%;
+    --foreground: 210 20% 98%;
+    --card: 224 71% 4% / 0.3;
+    --card-foreground: 210 20% 98%;
+    --popover: 224 71% 4%;
+    --popover-foreground: 210 20% 98%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 210 20% 98%;
+    --secondary: 215 28% 22%;
+    --secondary-foreground: 210 20% 98%;
+    --muted: 215 28% 22%;
+    --muted-foreground: 210 20% 80%;
+    --accent: 250 80% 60%;
+    --accent-foreground: 210 20% 98%;
+    --destructive: 0 63% 31%;
+    --destructive-foreground: 210 20% 98%;
+    --border: 215 28% 22%;
+    --input: 215 28% 22%;
+    --ring: 217 91% 60%;
+
+    --chart-1: 221 83% 53%;
+    --chart-2: 160 76% 45%;
+    --chart-3: 38 92% 50%;
+    --chart-4: 280 85% 65%;
+    --chart-5: 0 84% 60%;
+    --radius: 1rem;
+
+    --sidebar-background: 224 71% 4% / 0.5;
+    --sidebar-foreground: 210 20% 98%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 210 20% 98%;
+    --sidebar-accent: 217 91% 60% / 0.1;
+    --sidebar-accent-foreground: 210 20% 98%;
+    --sidebar-border: 215 28% 15% / 0.7;
+    --sidebar-ring: 217 91% 60%;
+  }
+
+  .dark {
+    --background: 215 28% 9%;
+    --foreground: 210 29% 94%;
+    --card: 215 28% 12% / 0.6;
+    --card-foreground: 210 29% 94%;
+    --popover: 215 28% 12% / 0.8;
+    --popover-foreground: 210 29% 94%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 215 28% 18% / 0.7;
+    --secondary-foreground: 210 29% 94%;
+    --muted: 215 28% 18% / 0.7;
+    --muted-foreground: 210 20% 75%;
+    --accent: 250 80% 60% / 0.7;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 215 28% 20% / 0.5;
+    --input: 215 28% 22% / 0.7;
+    --ring: 217 91% 60%;
+
+    --sidebar-background: 215 28% 11% / 0.9;
+    --sidebar-foreground: 210 29% 94%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 215 28% 15% / 0.8;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 215 28% 15% / 0.7;
+    --sidebar-ring: 217 91% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    background-color: #0b102a;
+    background-image: radial-gradient(circle at 1px 1px, #1a203f 1px, transparent 0);
+    background-size: 2.5rem 2.5rem;
+  }
+
+  /* ─── Calendar grid safety rules (belt-and-suspenders for react-day-picker v9) ─── */
+  /* These ensure the 7-column grid renders correctly regardless of which CSS is */
+  /* loaded first. The component-level Tailwind classes are the primary mechanism. */
+
+  .rdp-weeks,
+  .rdp-month_grid tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .rdp-week,
+  .rdp-month_grid tr {
+    display: flex !important;
+    width: 100%;
+  }
+
+  .rdp-weekdays {
+    display: flex !important;
+    width: 100%;
+  }
+
+  .rdp-day,
+  .rdp-weekday {
+    flex: 1 1 0 !important;
+    min-width: 0;
+  }
+
+  /* ─── Custom scrollbar for dark theme ─── */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(215 28% 30%);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(215 28% 45%);
+  }
+
+  /* ─── M-09: iPhone safe area inset for bottom nav ─── */
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
+
+@layer utilities {
+  @keyframes move-gradient {
+    0%   { background-position: 0% 50%; }
+    50%  { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  .animated-gradient-border {
+    -webkit-text-stroke: 1px transparent;
+    background-image: linear-gradient(to right, hsl(var(--primary)), hsl(var(--accent)), hsl(var(--primary)));
+    background-size: 200% auto;
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    animation: move-gradient 4s ease-in-out infinite;
+  }
+
+  /* ─── Skeleton pulse ─── */
+  @keyframes skeleton-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+  }
+  .skeleton-pulse {
+    animation: skeleton-pulse 1.8s ease-in-out infinite;
+  }
+}

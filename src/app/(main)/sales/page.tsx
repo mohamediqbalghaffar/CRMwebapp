@@ -1,0 +1,1127 @@
+'use client';
+
+import React, { useState, useMemo, useEffect, useRef, use } from 'react';
+import { createPortal } from 'react-dom';
+import { PageHeader } from "@/components/shared/page-header";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { PlusCircle, Loader2, FileSpreadsheet, Trash2, Edit, ArrowUpDown, Search, FileDown, FileUp, ChevronRight, ChevronLeft, Printer, Share2, Eye } from "lucide-react";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { SalesForm } from "./components/sales-form";
+import { DatePicker } from "@/components/ui/date-picker";
+import { useFirestore, useCollection, useMemoFirebase, collection, deleteDoc, doc, getDocs, runTransaction, getDoc, collectionGroup } from '@/firebase';
+import { WithId } from '@/firebase/firestore/use-collection';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { useToast } from '@/hooks/use-toast';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { SaleStatus, PaymentType } from '@/lib/types';
+import { PrintableReceipt } from './components/printable-receipt';
+import './printable-receipt.css';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import html2canvas from 'html2canvas';
+import { analyzePurchaseExcel } from '@/ai/flows/analyze-purchase-excel';
+import { cn } from '@/lib/utils';
+import * as XLSX from 'xlsx';
+
+// ── Constants ──────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 20;
+
+// ── Types ──────────────────────────────────────────────────────────────────────
+type SellingFormType = {
+    customerName: string;
+    issueDate: string;
+    totalPrice: number;
+    paymentStatus: SaleStatus;
+    paymentType: PaymentType;
+    formNumber: string;
+    creatorName?: string;
+    customerPhoneNumber?: string;
+    deliveryCost?: number;
+    discountType?: 'percentage' | 'cash';
+    discountValue?: number;
+};
+
+type SellingFormProduct = {
+    productId: string;
+    productName: string;
+    quantity: number;
+    unitPrice: number;
+    lineTotal: number;
+};
+
+// ── Filter options ─────────────────────────────────────────────────────────────
+const paymentStatusOptions: { value: SaleStatus | 'all', label: string }[] = [
+    { value: 'all', label: 'هەموو دۆخەکان' },
+    { value: 'Fully Paid', label: 'هەمووی دراوە' },
+    { value: 'Partially Paid', label: 'بەشێکی دراوە' },
+    { value: 'Unpaid', label: 'نەدراوە' },
+];
+
+const paymentTypeOptions: { value: PaymentType | 'all', label: string }[] = [
+    { value: 'all', label: 'هەموو جۆرەکان' },
+    { value: 'Direct Payment', label: 'پارەی ڕاستەوخۆ' },
+    { value: 'After Delivery', label: 'دوای گەیاندن' },
+    { value: 'Installments', label: 'قیست' },
+    { value: 'Pre-order', label: 'داواکاری پێشوەختە' },
+];
+
+// ── UploadSalesFormButton ──────────────────────────────────────────────────────
+function UploadSalesFormButton({ onSave }: { onSave: () => void }) {
+    const [isParsing, setIsParsing] = useState(false);
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const [initialItems, setInitialItems] = useState<any[] | undefined>(undefined);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const { toast } = useToast();
+    const firestore = useFirestore();
+
+    const productsQuery = useMemoFirebase(() => {
+        if (!firestore) return null;
+        return collection(firestore, 'products');
+    }, [firestore]);
+
+    const { data: allProducts } = useCollection<any>(productsQuery);
+
+    const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        setIsParsing(true);
+        toast({ title: '...شیکردنەوەی فایل' });
+
+        try {
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const dataUri = e.target?.result;
+                if (typeof dataUri !== 'string') {
+                    toast({ variant: 'destructive', title: "هەڵە لە خوێندنەوەی فایل" });
+                    setIsParsing(false);
+                    return;
+                }
+
+                try {
+                    const existingProductNames = allProducts?.map(p => p.productName) || [];
+                    const result = await analyzePurchaseExcel({ purchaseDataAsCsv: dataUri, existingProductNames } as any);
+
+                    const newItems = result.map(item => ({
+                        product: item.product,
+                        quantity: item.quantity,
+                        unitPrice: item.sellingPrice || item.unitPrice || 0,
+                        category: item.category,
+                    }));
+
+                    if (newItems.length > 0) {
+                        setInitialItems(newItems);
+                        setDialogOpen(true);
+                    } else {
+                        toast({ variant: 'destructive', title: "هیچ کاڵایەک نەدۆزرایەوە", description: "AI نەیتوانی هیچ کاڵایەک لەم فایلە دەربهێنێت." });
+                    }
+                } catch (aiError: any) {
+                    console.error("AI analysis failed:", aiError);
+                    toast({ variant: 'destructive', title: "هەڵە لە شیکردنەوەی فایل", description: "AI نەیتوانی داتاکان دەربهێنێت." });
+                } finally {
+                    setIsParsing(false);
+                    if (fileInputRef.current) fileInputRef.current.value = "";
+                }
+            };
+            reader.onerror = () => {
+                toast({ variant: 'destructive', title: "هەڵە لە خوێندنەوەی فایل" });
+                setIsParsing(false);
+            };
+            reader.readAsDataURL(file);
+        } catch (error) {
+            console.error("File processing error:", error);
+            toast({ variant: 'destructive', title: "هەڵەیەک ڕوویدا", description: "پرۆسێسی فایلەکە سەرکەوتوو نەبوو." });
+            setIsParsing(false);
+        }
+    };
+
+    const triggerUpload = () => fileInputRef.current?.click();
+
+    return (
+        <>
+            <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                className="hidden"
+                accept="image/jpeg, image/png, application/pdf, .xlsx, .xls, .csv"
+            />
+            <Button onClick={triggerUpload} disabled={isParsing} variant="outline">
+                {isParsing ? <Loader2 className="ml-2 h-4 w-4 animate-spin" /> : <FileUp />}
+                هاوردەکردنی پسوولە
+            </Button>
+
+            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                <DialogContent className="max-w-[95vw] sm:max-w-[90vw] h-[95vh] sm:h-[90vh] flex flex-col p-0 overflow-hidden" dir="rtl">
+                    <DialogHeader className="flex-shrink-0 border-b">
+                        <div className="text-center p-4">
+                            <DialogTitle className="text-2xl font-bold">BedArt Group</DialogTitle>
+                            <DialogDescription className="text-sm">
+                                وردبینی زانیارییەکان بکە و پاشەکەوتی بکە.
+                            </DialogDescription>
+                        </div>
+                    </DialogHeader>
+                    <div className="flex-1 overflow-y-auto p-2 sm:p-4">
+                        <SalesForm
+                            formId={null}
+                            onSave={() => { onSave(); setDialogOpen(false); }}
+                            initialItems={initialItems}
+                        />
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </>
+    );
+}
+
+// ── ReceiptPreview ─────────────────────────────────────────────────────────────
+function ReceiptPreview({ formId }: { formId: string }) {
+    const firestore = useFirestore();
+    const [printData, setPrintData] = useState<any>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isDownloading, setIsDownloading] = useState(false);
+    const [canShare, setCanShare] = useState(false);
+    const { toast } = useToast();
+    const receiptRef = useRef<HTMLDivElement>(null);
+    const captureRef = useRef<HTMLDivElement>(null); // hidden full-size for html2canvas
+
+    useEffect(() => {
+        setCanShare(typeof navigator !== 'undefined' && !!navigator.share);
+    }, []);
+
+    useEffect(() => {
+        const fetchPrintData = async () => {
+            if (!firestore || !formId) return;
+            setIsLoading(true);
+            try {
+                const formRef = doc(firestore, 'selling_forms', formId);
+                const productsRef = collection(firestore, `selling_forms/${formId}/selling_form_products`);
+                const paymentsRef = collection(firestore, `selling_forms/${formId}/payments`);
+                const companyInfoRef = doc(firestore, 'app_settings', 'companyInfo');
+                const [formSnap, productsSnap, paymentsSnap, companyInfoSnap] = await Promise.all([
+                    getDoc(formRef), getDocs(productsRef), getDocs(paymentsRef), getDoc(companyInfoRef),
+                ]);
+                if (!formSnap.exists()) {
+                    toast({ variant: 'destructive', title: 'هەڵە', description: 'پسوولە نەدۆزرایەوە.' });
+                    setIsLoading(false);
+                    return;
+                }
+                const rawData = formSnap.data();
+                setPrintData({
+                    formData: { ...rawData, formNumber: String(rawData.formNumber || '0'), customerPhoneNumber: rawData.customerPhoneNumber || rawData.customerPhone || "" },
+                    products: productsSnap.docs.map(d => d.data()),
+                    payments: paymentsSnap.docs.map(d => d.data()),
+                    companyInfo: companyInfoSnap.exists() ? companyInfoSnap.data() : null,
+                });
+            } catch (error) {
+                console.error("Error preparing print data:", error);
+                toast({ variant: 'destructive', title: 'هەڵەیەک ڕوویدا', description: 'ئامادەکردنی داتا بۆ بینین سەرکەوتوو نەبوو.' });
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        fetchPrintData();
+    }, [formId, firestore, toast]);
+
+    const generateImageBlob = async (): Promise<{ dataUrl: string; blob: Blob; fileName: string } | null> => {
+        const targetEl = captureRef.current;
+        if (!targetEl) {
+            toast({ variant: 'destructive', title: 'هەڵە', description: 'نەتوانرا وێنەی پسوولە دروستبکرێت.' });
+            return null;
+        }
+        const canvas = await html2canvas(targetEl, {
+            scale: 3,
+            useCORS: true,
+            backgroundColor: '#ffffff',
+            logging: false,
+            width: targetEl.offsetWidth,
+            height: targetEl.scrollHeight,
+        });
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+        const blob = await (await fetch(dataUrl)).blob();
+        const fileName = `receipt-${printData?.formData?.formNumber || '0'}.jpeg`;
+        return { dataUrl, blob, fileName };
+    };
+
+    const handleDownloadAsJPEG = async () => {
+        setIsDownloading(true);
+        toast({ title: '...ئامادەکردنی وێنە' });
+        try {
+            const result = await generateImageBlob();
+            if (!result) return;
+            const { dataUrl, fileName } = result;
+
+            const link = document.createElement('a');
+            link.href = dataUrl;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            toast({ title: 'سەرکەوتوو بوو', description: 'پسوولەکە وەک وێنە دابەزێنرا.', className: 'bg-accent text-accent-foreground' });
+        } catch (error) {
+            console.error('Error downloading as JPEG:', error);
+            toast({ variant: 'destructive', title: 'هەڵەیەک ڕوویدا', description: 'دابەزاندنی وێنەکە سەرکەوتوو نەبوو.' });
+        } finally {
+            setIsDownloading(false);
+        }
+    };
+
+    const handleShareReceipt = async () => {
+        setIsDownloading(true);
+        toast({ title: '...ئامادەکردنی هاوبەشکردن' });
+        try {
+            const result = await generateImageBlob();
+            if (!result) return;
+            const { dataUrl, blob, fileName } = result;
+
+            if (navigator.share) {
+                const file = new File([blob], fileName, { type: 'image/jpeg' });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: `پسوولەی فرۆشتن - ${printData?.formData?.customerName}` });
+                    toast({ title: 'سەرکەوتوو بوو', className: 'bg-accent text-accent-foreground' });
+                    return;
+                }
+            }
+            // Fallback to download if share not supported
+            const link = document.createElement('a');
+            link.href = dataUrl;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            toast({ title: 'سەرکەوتوو بوو', description: 'پسوولەکە وەک وێنە دابەزێنرا.', className: 'bg-accent text-accent-foreground' });
+        } catch (error: any) {
+            if (error.name === 'AbortError') return;
+            console.error('Error sharing:', error);
+            toast({ variant: 'destructive', title: 'هەڵەیەک ڕوویدا', description: 'هاوبەشکردن سەرکەوتوو نەبوو.' });
+        } finally {
+            setIsDownloading(false);
+        }
+    };
+
+    if (isLoading) return (
+        <div className="flex flex-col justify-center items-center h-48 gap-3">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <p className="text-sm text-muted-foreground animate-pulse">ئامادەکردنی پسوولە...</p>
+        </div>
+    );
+    if (!printData) return (
+        <div className="flex flex-col items-center justify-center p-8 gap-3 text-muted-foreground">
+            <FileSpreadsheet className="h-12 w-12 opacity-30" />
+            <p>داتا بۆ ئەم پسوولەیە نەدۆزرایەوە.</p>
+        </div>
+    );
+
+    return (
+        <div className="flex flex-col h-full overflow-hidden gap-3">
+            {/* Hidden full-size receipt for html2canvas — no CSS scaling */}
+            <div style={{ position: 'fixed', left: '-9999px', top: 0, zIndex: -1, opacity: 0, pointerEvents: 'none' }}>
+                <PrintableReceipt ref={captureRef} formData={printData.formData} products={printData.products} payments={printData.payments} companyInfo={printData.companyInfo} />
+            </div>
+
+            {/* Receipt preview — scrollable scaled preview */}
+            <div className="flex-1 bg-muted/30 border border-border/50 rounded-xl overflow-auto flex justify-center items-start p-3 sm:p-6">
+                <div
+                    style={{
+                        transform: 'scale(0.42)',
+                        transformOrigin: 'top center',
+                        width: '210mm',
+                        marginBottom: 'calc((210mm * 0.42) - 210mm)',
+                    }}
+                    className="shadow-2xl rounded-sm md:scale-[0.65] lg:scale-[0.80] xl:scale-[0.95]"
+                >
+                    <PrintableReceipt ref={receiptRef} formData={printData.formData} products={printData.products} payments={printData.payments} companyInfo={printData.companyInfo} />
+                </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                <Button 
+                    onClick={handleDownloadAsJPEG} 
+                    disabled={isDownloading} 
+                    className="flex-1 h-12 text-sm font-bold shadow-md" 
+                    size="lg"
+                >
+                    {isDownloading ? <Loader2 className="ml-2 h-5 w-5 animate-spin" /> : <FileDown className="ml-2 h-5 w-5" />}
+                    دابەزاندنی پسوولە (JPEG)
+                </Button>
+                {canShare && (
+                    <Button 
+                        onClick={handleShareReceipt} 
+                        disabled={isDownloading} 
+                        variant="secondary"
+                        className="flex-1 h-12 text-sm font-bold shadow-md" 
+                        size="lg"
+                    >
+                        {isDownloading ? <Loader2 className="ml-2 h-5 w-5 animate-spin" /> : <Share2 className="ml-2 h-5 w-5" />}
+                        هاوبەشکردنی پسوولە
+                    </Button>
+                )}
+            </div>
+        </div>
+    );
+}
+
+
+// ── DownloadTemplateButton ───────────────────────────────────────────────────
+function DownloadTemplateButton() {
+    const handleDownload = () => {
+        const headers = [['ناو', 'نرخی فرۆشتن', 'دانە']];
+        const ws = XLSX.utils.aoa_to_sheet(headers);
+        
+        // Set column widths
+        ws['!cols'] = [{ wch: 35 }, { wch: 20 }, { wch: 15 }];
+        
+        // Set RTL
+        if (!ws['!views']) ws['!views'] = [];
+        ws['!views'].push({ rightToLeft: true });
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Sales Template");
+        XLSX.writeFile(wb, "BedArt_Sales_Template.xlsx");
+    };
+
+    return (
+        <Button onClick={handleDownload} variant="outline" className="border-dashed hover:bg-primary/5 transition-colors">
+            <FileDown className="ml-2 h-4 w-4" />
+            داگرتنی نموونەی فۆڕم
+        </Button>
+    );
+}
+
+
+// ── SalesList ──────────────────────────────────────────────────────────────────
+function SalesList() {
+    const firestore = useFirestore();
+    const { toast } = useToast();
+    const [refreshKey, setRefreshKey] = useState(0);
+    const [sortConfig, setSortConfig] = useState<{ key: keyof SellingFormType; direction: 'ascending' | 'descending' } | null>(null);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [statusFilter, setStatusFilter] = useState<SaleStatus | 'all'>('all');
+    const [typeFilter, setTypeFilter] = useState<PaymentType | 'all'>('all');
+    const [fromDate, setFromDate] = useState<string>('');
+    const [toDate, setToDate] = useState<string>('');
+    const [productSearch, setProductSearch] = useState<string>('');
+    const [currentPage, setCurrentPage] = useState(1);
+
+    const [editingFormId, setEditingFormId] = useState<string | null>(null);
+    const [previewFormId, setPreviewFormId] = useState<string | null>(null);
+    const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+
+    const [printData, setPrintData] = useState<any>(null);
+    const [isPrinting, setIsPrinting] = useState(false);
+    const printRef = useRef(null);
+
+    const sellingFormsQuery = useMemoFirebase(() => {
+        if (!firestore) return null;
+        return collection(firestore, 'selling_forms');
+    }, [firestore, refreshKey]);
+
+    const { data: sales, isLoading: isLoadingSales } = useCollection<SellingFormType>(sellingFormsQuery);
+
+    const formProductsQuery = useMemoFirebase(() => {
+        if (!firestore) return null;
+        return collectionGroup(firestore, 'selling_form_products');
+    }, [firestore]);
+
+    const { data: formProducts } = useCollection<any>(formProductsQuery);
+
+    // ── Filter + sort ──
+    const sortedSales = useMemo(() => {
+        if (!sales) return [];
+        let sortableItems = [...sales];
+
+        let matchingFormIds = new Set<string>();
+        if (productSearch && formProducts) {
+            formProducts.forEach(fp => {
+                if ((fp.productName || fp.product || '').toLowerCase().includes(productSearch.toLowerCase())) {
+                    matchingFormIds.add(fp.sellingFormId);
+                }
+            });
+        }
+
+        sortableItems = sortableItems.filter(sale => {
+            const searchMatch = searchTerm
+                ? sale.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                  sale.formNumber.includes(searchTerm)
+                : true;
+            const statusMatch = statusFilter !== 'all' ? sale.paymentStatus === statusFilter : true;
+            const typeMatch = typeFilter !== 'all' ? sale.paymentType === typeFilter : true;
+            const fromDateMatch = fromDate ? sale.issueDate >= fromDate : true;
+            const toDateMatch = toDate ? sale.issueDate <= toDate : true;
+            const productMatch = productSearch ? matchingFormIds.has(sale.id) : true;
+            
+            return searchMatch && statusMatch && typeMatch && fromDateMatch && toDateMatch && productMatch;
+        });
+
+        if (sortConfig !== null) {
+            sortableItems.sort((a, b) => {
+                const aValue = a[sortConfig.key];
+                const bValue = b[sortConfig.key];
+
+                if (aValue === null || aValue === undefined) return 1;
+                if (bValue === null || bValue === undefined) return -1;
+
+                if (sortConfig.key === 'formNumber') {
+                    const numA = parseInt(String(aValue), 10);
+                    const numB = parseInt(String(bValue), 10);
+                    if (isNaN(numA) || isNaN(numB)) {
+                        if (String(aValue) < String(bValue)) return sortConfig.direction === 'ascending' ? -1 : 1;
+                        if (String(aValue) > String(bValue)) return sortConfig.direction === 'ascending' ? 1 : -1;
+                        return 0;
+                    }
+                    if (numA < numB) return sortConfig.direction === 'ascending' ? -1 : 1;
+                    if (numA > numB) return sortConfig.direction === 'ascending' ? 1 : -1;
+                    return 0;
+                }
+
+                if (aValue < bValue) return sortConfig.direction === 'ascending' ? -1 : 1;
+                if (aValue > bValue) return sortConfig.direction === 'ascending' ? 1 : -1;
+                return 0;
+            });
+        }
+        return sortableItems;
+    }, [sales, sortConfig, searchTerm, statusFilter, typeFilter]);
+
+    // ── Reset to page 1 whenever filters or search change ──
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchTerm, statusFilter, typeFilter, fromDate, toDate, productSearch, sortConfig]);
+
+    // ── Pagination ──
+    const totalPages = Math.max(1, Math.ceil(sortedSales.length / PAGE_SIZE));
+    const paginatedSales = useMemo(
+        () => sortedSales.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+        [sortedSales, currentPage]
+    );
+
+    // ── Print: useEffect-driven so the DOM renders before window.print() ──
+    useEffect(() => {
+        if (isPrinting && printData) {
+            const handleAfterPrint = () => {
+                setIsPrinting(false);
+                setPrintData(null);
+                window.removeEventListener('afterprint', handleAfterPrint);
+            };
+
+            const timer = setTimeout(() => {
+                window.addEventListener('afterprint', handleAfterPrint);
+                window.print();
+                
+                // Fallback for browsers that don't support afterprint well
+                if (window.matchMedia) {
+                    const mediaQueryList = window.matchMedia('print');
+                    mediaQueryList.addEventListener('change', (mql) => {
+                        if (!mql.matches) {
+                            handleAfterPrint();
+                        }
+                    });
+                }
+                
+                // Final safety fallback
+                setTimeout(handleAfterPrint, 3000);
+            }, 800); // Increased timeout for mobile rendering
+            
+            return () => {
+                clearTimeout(timer);
+                window.removeEventListener('afterprint', handleAfterPrint);
+            };
+        }
+    }, [isPrinting, printData]);
+
+    // ── Sort helpers ──
+    const requestSort = (key: keyof SellingFormType) => {
+        let direction: 'ascending' | 'descending' = 'ascending';
+        if (sortConfig && sortConfig.key === key && sortConfig.direction === 'ascending') {
+            direction = 'descending';
+        }
+        setSortConfig({ key, direction });
+    };
+
+    const getSortIcon = (key: keyof SellingFormType) => (
+        <ArrowUpDown className={`mr-2 h-4 w-4 ${sortConfig?.key === key ? 'text-primary' : 'text-muted-foreground'}`} />
+    );
+
+    const handleFormSave = () => {
+        setEditingFormId(null);
+        setIsCreateDialogOpen(false);
+        setRefreshKey(prev => prev + 1);
+    };
+
+    const handleDelete = async (formId: string) => {
+        if (!firestore) return;
+        try {
+            // D-01: Fetch subcollection IDs outside the transaction
+            const productsSoldRef = collection(firestore, `selling_forms/${formId}/selling_form_products`);
+            const productsSoldSnapshot = await getDocs(productsSoldRef);
+            const productsSold = productsSoldSnapshot.docs.map(d => ({ ref: d.ref, ...d.data() as SellingFormProduct }));
+
+            const paymentsRef = collection(firestore, `selling_forms/${formId}/payments`);
+            const paymentsSnapshot = await getDocs(paymentsRef);
+
+            // D-01: Single atomic transaction for ALL stock restorations + deletions
+            await runTransaction(firestore, async (transaction) => {
+                // Read all product docs first (all reads before writes)
+                const productSnapshots = await Promise.all(
+                    productsSold.map(item => {
+                        const productRef = doc(firestore, 'products', item.productId);
+                        return transaction.get(productRef).then(snap => ({ snap, item }));
+                    })
+                );
+
+                // Now write: restore stock quantities
+                for (const { snap, item } of productSnapshots) {
+                    if (snap.exists()) {
+                        const currentQuantity = snap.data().currentQuantity || 0;
+                        const newQuantity = Number(currentQuantity) + Number(item.quantity);
+                        transaction.update(snap.ref, { currentQuantity: newQuantity });
+                    }
+                }
+
+                // Delete subcollection docs
+                productsSold.forEach(item => transaction.delete(item.ref));
+                paymentsSnapshot.docs.forEach(p => transaction.delete(p.ref));
+
+                // Delete the form itself
+                transaction.delete(doc(firestore, 'selling_forms', formId));
+            });
+
+            toast({
+                title: "سەرکەوتوو بوو",
+                description: "فۆڕمی فرۆشتن بە سەرکەوتوویی سڕایەوە.",
+                className: "bg-accent text-accent-foreground",
+            });
+            handleFormSave();
+        } catch (error) {
+            console.error("Error deleting sales form:", error);
+            toast({ variant: 'destructive', title: "هەڵەیەک ڕوویدا", description: "سڕینەوەی فۆڕمی فرۆشتن سەرکەوتوو نەبوو." });
+        }
+    };
+
+    const handleDirectPrint = async (formId: string) => {
+        if (!firestore) return;
+
+        // window.print() is broken on iOS and unreliable on Android.
+        // On mobile, open the preview/share dialog instead.
+        const isMobile = typeof navigator !== 'undefined' &&
+            (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+             ('ontouchstart' in window && navigator.maxTouchPoints > 1));
+
+        if (isMobile) {
+            setTimeout(() => setPreviewFormId(formId), 100);
+            return;
+        }
+
+        toast({ title: '...ئامادەکردنی پسوولە' });
+        try {
+            const formRef = doc(firestore, 'selling_forms', formId);
+            const productsRef = collection(firestore, `selling_forms/${formId}/selling_form_products`);
+            const paymentsRef = collection(firestore, `selling_forms/${formId}/payments`);
+            const companyInfoRef = doc(firestore, 'app_settings', 'companyInfo');
+
+            const [formSnap, productsSnap, paymentsSnap, companyInfoSnap] = await Promise.all([
+                getDoc(formRef),
+                getDocs(productsRef),
+                getDocs(paymentsRef),
+                getDoc(companyInfoRef),
+            ]);
+
+            if (formSnap.exists()) {
+                const rawData = formSnap.data();
+                const standardizedData = {
+                    ...rawData,
+                    formNumber: String(rawData.formNumber || '0'),
+                    customerPhoneNumber: rawData.customerPhoneNumber || rawData.customerPhone || ""
+                };
+                setPrintData({
+                    formData: standardizedData,
+                    products: productsSnap.docs.map(d => d.data()),
+                    payments: paymentsSnap.docs.map(d => d.data()),
+                    companyInfo: companyInfoSnap.exists() ? companyInfoSnap.data() : null,
+                });
+                setIsPrinting(true);
+            }
+        } catch (error) {
+            console.error("Print failed:", error);
+            toast({ variant: 'destructive', title: "هەڵەیەک ڕوویدا", description: "چاپکردنی پسوولە سەرکەوتوو نەبوو." });
+            setIsPrinting(false);
+        }
+    };
+
+
+    // ── Currency formatter ──
+    const fmt = useMemo(() => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }), []);
+
+    return (
+        <div className={cn("h-full flex flex-col min-h-0 gap-4", isPrinting ? "no-print" : "")}>
+            <PageHeader title="بەڕێوەبردنی فرۆشتن" description="تۆماری فۆڕمەکانی فرۆشتن لێرە ببینە و زیاد بکە.">
+                <div className="flex items-center gap-2">
+                    <Button onClick={() => setIsCreateDialogOpen(true)}>
+                        <PlusCircle className="mr-2 h-4 w-4" />
+                        دروستکردنی فۆڕمی فرۆشتن
+                    </Button>
+                    {/* M-01: Secondary actions in dropdown on mobile */}
+                    <div className="hidden md:flex items-center gap-2">
+                        <UploadSalesFormButton onSave={handleFormSave} />
+                        <DownloadTemplateButton />
+                    </div>
+                    <div className="md:hidden">
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button variant="outline" size="icon"><FileUp className="h-4 w-4" /></Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                                <DropdownMenuItem onSelect={() => { /* trigger upload via ref */ }}>
+                                    هاوردەکردنی پسوولە
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onSelect={() => {
+                                    const headers = [['ناو', 'نرخی فرۆشتن', 'دانە']];
+                                    const ws = XLSX.utils.aoa_to_sheet(headers);
+                                    ws['!cols'] = [{ wch: 35 }, { wch: 20 }, { wch: 15 }];
+                                    const wb = XLSX.utils.book_new();
+                                    XLSX.utils.book_append_sheet(wb, ws, 'Sales Template');
+                                    XLSX.writeFile(wb, 'BedArt_Sales_Template.xlsx');
+                                }}>
+                                    داگرتنی نموونەی فۆڕم
+                                </DropdownMenuItem>
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    </div>
+                </div>
+            </PageHeader>
+
+            {/* ── Create dialog ── */}
+            <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+                <DialogContent className="max-w-[95vw] sm:max-w-[90vw] h-[95vh] sm:h-[90vh] flex flex-col p-0 overflow-hidden" dir="rtl">
+                    <DialogHeader className="flex-shrink-0 border-b">
+                        <div className="text-center p-4">
+                            <DialogTitle className="text-2xl font-bold">BedArt Group</DialogTitle>
+                            <DialogDescription className="text-sm">تەختی نوستن . دۆشەک . پشتی</DialogDescription>
+                        </div>
+                    </DialogHeader>
+                    <div className="flex-1 overflow-y-auto p-2 sm:p-4">
+                        <SalesForm formId={null} onSave={handleFormSave} />
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {/* ── Edit dialog ── */}
+            <Dialog open={!!editingFormId} onOpenChange={(open) => !open && setEditingFormId(null)}>
+                <DialogContent className="max-w-[95vw] sm:max-w-[90vw] h-[95vh] sm:h-[90vh] flex flex-col p-0 overflow-hidden" dir="rtl">
+                    <DialogHeader className="flex-shrink-0 border-b">
+                        <div className="text-center p-4">
+                            <DialogTitle className="text-2xl font-bold">BedArt Group</DialogTitle>
+                            <DialogDescription className="text-sm">دەستکاریکردنی فۆڕم</DialogDescription>
+                        </div>
+                    </DialogHeader>
+                    <div className="flex-1 overflow-y-auto p-2 sm:p-4">
+                        {editingFormId && <SalesForm formId={editingFormId} onSave={handleFormSave} />}
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {/* ── Receipt preview dialog ── */}
+            <Dialog open={!!previewFormId} onOpenChange={(open) => !open && setPreviewFormId(null)}>
+                <DialogContent className="max-w-[95vw] sm:max-w-5xl h-[90vh] flex flex-col p-3 sm:p-5" dir="rtl">
+                    <DialogHeader className="flex-shrink-0 pb-2 border-b border-border/50">
+                        <DialogTitle className="flex items-center gap-2 text-base">
+                            <FileSpreadsheet className="h-5 w-5 text-primary" />
+                            پێشبینینی پسوولە
+                        </DialogTitle>
+                        <DialogDescription className="text-xs text-muted-foreground">
+                            پسوولەکە لێرە ببینە و دایبەزێنە یان هاوبەشی بکە.
+                        </DialogDescription>
+                    </DialogHeader>
+                    {previewFormId && <ReceiptPreview formId={previewFormId} />}
+                </DialogContent>
+            </Dialog>
+
+            {/* ── Direct print area (Rendered via Portal to body) ── */}
+            {isPrinting && printData && typeof document !== 'undefined' && createPortal(
+                <div id="printable-area" className="fixed inset-0 z-[9999] bg-white">
+                    <PrintableReceipt
+                        ref={printRef}
+                        formData={printData.formData}
+                        products={printData.products}
+                        payments={printData.payments}
+                        companyInfo={printData.companyInfo}
+                    />
+                </div>,
+                document.body
+            )}
+
+            {/* ── Main table card ── */}
+            <Card className="flex-1 flex flex-col overflow-hidden min-h-0">
+                <CardHeader className="flex-shrink-0 space-y-3 p-4 pb-2 md:p-6 md:pb-4">
+                    <CardTitle className="text-lg md:text-xl">لیستی فرۆشتنەکان</CardTitle>
+                    <div className="flex flex-col space-y-2 md:space-y-4">
+                        <div className="flex flex-col md:flex-row items-center justify-between gap-2 md:gap-4">
+                            {/* Search general */}
+                            <div className="relative w-full md:max-w-sm">
+                                <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                                <Input
+                                    placeholder="گەڕان بەپێی ناوی کڕیار یان ژمارەی فۆڕم..."
+                                    className="pr-10 h-9"
+                                    value={searchTerm}
+                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                />
+                            </div>
+                            {/* Status/Type Filters */}
+                            <div className="grid grid-cols-2 md:flex md:flex-row gap-2 w-full md:w-auto">
+                                <Select dir="rtl" value={statusFilter} onValueChange={(value) => setStatusFilter(value as any)}>
+                                    <SelectTrigger className="w-full md:w-[150px] h-9"><SelectValue placeholder="دۆخ" /></SelectTrigger>
+                                    <SelectContent>
+                                        {paymentStatusOptions.map(opt => <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>)}
+                                    </SelectContent>
+                                </Select>
+                                <Select dir="rtl" value={typeFilter} onValueChange={(value) => setTypeFilter(value as any)}>
+                                    <SelectTrigger className="w-full md:w-[150px] h-9"><SelectValue placeholder="جۆر" /></SelectTrigger>
+                                    <SelectContent>
+                                        {paymentTypeOptions.map(opt => <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>)}
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                        </div>
+                        {/* Advanced Filters */}
+                        <div className="flex flex-col md:flex-row items-center gap-2 bg-muted/20 p-2 md:p-3 rounded-lg border">
+                            <div className="grid grid-cols-2 gap-2 w-full md:w-auto">
+                                <div className="flex flex-col gap-1 w-full">
+                                    <span className="text-[10px] text-muted-foreground px-1 hidden md:inline">لە بەرواری:</span>
+                                    <DatePicker value={fromDate} onChange={setFromDate} className="w-full md:w-[140px] h-8 text-xs" placeholder="لە بەرواری..." />
+                                </div>
+                                <div className="flex flex-col gap-1 w-full">
+                                    <span className="text-[10px] text-muted-foreground px-1 hidden md:inline">تا بەرواری:</span>
+                                    <DatePicker value={toDate} onChange={setToDate} className="w-full md:w-[140px] h-8 text-xs" placeholder="تا بەرواری..." />
+                                </div>
+                            </div>
+                            <div className="w-full md:flex-1 mt-1 md:mt-0">
+                                <Input
+                                    placeholder="گەڕان بەپێی ناوی کاڵا..."
+                                    value={productSearch}
+                                    onChange={(e) => setProductSearch(e.target.value)}
+                                    className="w-full h-8 text-xs"
+                                />
+                            </div>
+                        </div>
+                    </div>
+                </CardHeader>
+
+                <CardContent className="flex-1 overflow-y-auto min-h-0 p-0 md:p-6">
+                    {/* ── Desktop table ── */}
+                    <TooltipProvider delayDuration={300}>
+                        <Table className="hidden md:table relative">
+                            <TableHeader className="sticky top-0 bg-background z-10 shadow-sm">
+                                <TableRow>
+                                    <TableHead className="text-center">
+                                        <Button variant="ghost" onClick={() => requestSort('formNumber')}>
+                                            {getSortIcon('formNumber')} ژ. فۆڕم
+                                        </Button>
+                                    </TableHead>
+                                    <TableHead className="text-center">
+                                        <Button variant="ghost" onClick={() => requestSort('customerName')}>
+                                            {getSortIcon('customerName')} کڕیار
+                                        </Button>
+                                    </TableHead>
+                                    <TableHead className="text-center">
+                                        <Button variant="ghost" onClick={() => requestSort('issueDate')}>
+                                            {getSortIcon('issueDate')} بەروار
+                                        </Button>
+                                    </TableHead>
+                                    <TableHead className="text-center">
+                                        <Button variant="ghost" onClick={() => requestSort('totalPrice')}>
+                                            {getSortIcon('totalPrice')} بڕی فرۆشراو
+                                        </Button>
+                                    </TableHead>
+                                    <TableHead className="text-center">
+                                        <Button variant="ghost" onClick={() => requestSort('paymentStatus')}>
+                                            {getSortIcon('paymentStatus')} بارودۆخ
+                                        </Button>
+                                    </TableHead>
+                                    <TableHead className="text-center">کردارەکان</TableHead>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                {isLoadingSales ? (
+                                    /* ── Loading skeleton ── */
+                                    [...Array(5)].map((_, i) => (
+                                        <TableRow key={i} className="animate-pulse">
+                                            {[...Array(6)].map((_, j) => (
+                                                <TableCell key={j}>
+                                                    <div className="h-4 bg-muted rounded w-3/4 mx-auto" />
+                                                </TableCell>
+                                            ))}
+                                        </TableRow>
+                                    ))
+                                ) : !paginatedSales || paginatedSales.length === 0 ? (
+                                    /* ── Empty state ── */
+                                    <TableRow>
+                                        <TableCell colSpan={6} className="py-16 text-center">
+                                            <div className="flex flex-col items-center gap-3 text-muted-foreground">
+                                                <FileSpreadsheet className="h-12 w-12 opacity-30" />
+                                                <p className="text-base font-medium">هیچ فرۆشێک بەم پێوەرانە نەدۆزرایەوە.</p>
+                                                {(searchTerm || statusFilter !== 'all' || typeFilter !== 'all') && (
+                                                    <p className="text-sm opacity-70">فلتەرەکانت بگۆڕە یان پاک بکەرەوە.</p>
+                                                )}
+                                            </div>
+                                        </TableCell>
+                                    </TableRow>
+                                ) : (
+                                    paginatedSales.map((sale) => (
+                                        <TableRow key={sale.id} className="group transition-colors hover:bg-muted/30">
+                                            <TableCell className="font-medium text-center">{sale.formNumber}</TableCell>
+                                            <TableCell className="text-center">{sale.customerName}</TableCell>
+                                            <TableCell className="text-center">{sale.issueDate}</TableCell>
+                                            <TableCell className="text-center font-mono text-sm"><span dir="ltr" className="inline-block">{fmt.format(sale.totalPrice || 0)}</span></TableCell>
+                                            <TableCell className="text-center">
+                                                <Badge
+                                                    variant={sale.paymentStatus === 'Fully Paid' ? 'default' : sale.paymentStatus === 'Unpaid' ? 'destructive' : 'secondary'}
+                                                    className={sale.paymentStatus === 'Fully Paid' ? 'bg-green-600 text-white' : ''}
+                                                >
+                                                    {paymentStatusOptions.find(o => o.value === sale.paymentStatus)?.label || sale.paymentStatus}
+                                                </Badge>
+                                            </TableCell>
+                                            <TableCell className="text-center">
+                                                <div className="flex items-center justify-center gap-1">
+                                                    {/* Edit */}
+                                                    <Tooltip>
+                                                        <TooltipTrigger asChild>
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                className="h-8 w-8 hover:bg-blue-500/10 hover:text-blue-400 transition-colors"
+                                                                onClick={() => setEditingFormId(sale.id)}
+                                                            >
+                                                                <Edit className="h-4 w-4 text-blue-500" />
+                                                            </Button>
+                                                        </TooltipTrigger>
+                                                        <TooltipContent><p>دەستکاریکردن</p></TooltipContent>
+                                                    </Tooltip>
+
+                                                    {/* Delete */}
+                                                    <AlertDialog>
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
+                                                                <AlertDialogTrigger asChild>
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="icon"
+                                                                        className="h-8 w-8 hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                                                                    >
+                                                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                                                    </Button>
+                                                                </AlertDialogTrigger>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent><p>سڕینەوە</p></TooltipContent>
+                                                        </Tooltip>
+                                                        <AlertDialogContent dir="rtl">
+                                                            <AlertDialogHeader>
+                                                                <AlertDialogTitle>دڵنیایت لە سڕینەوەی ئەم فۆڕمە؟</AlertDialogTitle>
+                                                                <AlertDialogDescription>ئەم کردارە پاشگەزبوونەوەی نییە. کاڵاکان دووبارە بۆ کۆگا دەگەڕێنرێنەوە.</AlertDialogDescription>
+                                                            </AlertDialogHeader>
+                                                            <AlertDialogFooter>
+                                                                <AlertDialogCancel>پاشگەزبوونەوە</AlertDialogCancel>
+                                                                <AlertDialogAction onClick={() => handleDelete(sale.id)} className="bg-destructive hover:bg-destructive/90">بەڵێ، بسڕەوە</AlertDialogAction>
+                                                            </AlertDialogFooter>
+                                                        </AlertDialogContent>
+                                                    </AlertDialog>
+
+                                                    {/* Receipt / Print */}
+                                                    <Tooltip>
+                                                        <TooltipTrigger asChild>
+                                                            <span>
+                                                                <DropdownMenu>
+                                                                    <DropdownMenuTrigger asChild>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-8 w-8 hover:bg-muted transition-colors"
+                                                                        >
+                                                                            <FileSpreadsheet className="h-4 w-4" />
+                                                                        </Button>
+                                                                    </DropdownMenuTrigger>
+                                                                    <DropdownMenuContent>
+                                                                        <DropdownMenuItem onSelect={() => { 
+                                                                            setTimeout(() => setPreviewFormId(sale.id), 150); 
+                                                                        }}>
+                                                                            بینینی پسوولە
+                                                                        </DropdownMenuItem>
+                                                                        <DropdownMenuItem onSelect={() => { 
+                                                                            setTimeout(() => handleDirectPrint(sale.id), 150); 
+                                                                        }}>
+                                                                            چاپکردنی پسوولە
+                                                                        </DropdownMenuItem>
+                                                                    </DropdownMenuContent>
+                                                                </DropdownMenu>
+                                                            </span>
+                                                        </TooltipTrigger>
+                                                        <TooltipContent><p>پسوولە</p></TooltipContent>
+                                                    </Tooltip>
+                                                </div>
+                                            </TableCell>
+                                        </TableRow>
+                                    ))
+                                )}
+                            </TableBody>
+                        </Table>
+                    </TooltipProvider>
+
+                    {/* ── Mobile cards ── */}
+                    <div className="md:hidden space-y-2 px-2 pb-2">
+                        {isLoadingSales ? (
+                            [...Array(5)].map((_, i) => (
+                                <div key={i} className="animate-pulse h-20 bg-muted rounded-lg" />
+                            ))
+                        ) : !paginatedSales || paginatedSales.length === 0 ? (
+                            <div className="py-10 text-center text-muted-foreground">
+                                <FileSpreadsheet className="h-10 w-10 opacity-30 mx-auto mb-2" />
+                                <p className="text-sm font-medium">هیچ فرۆشێک نەدۆزرایەوە.</p>
+                            </div>
+                        ) : (
+                            paginatedSales.map((sale) => (
+                                <div key={sale.id} className="bg-card border rounded-lg p-2 space-y-1.5 shadow-sm transition-shadow hover:shadow-md">
+                                    <div className="flex justify-between items-center gap-2 px-1 pt-1">
+                                        <div className="font-bold text-sm truncate flex-1 text-right">{sale.customerName}</div>
+                                        <Badge
+                                            variant={sale.paymentStatus === 'Fully Paid' ? 'default' : sale.paymentStatus === 'Unpaid' ? 'destructive' : 'secondary'}
+                                            className={cn("text-[10px] px-1.5 h-4 flex-shrink-0 leading-none items-center", sale.paymentStatus === 'Fully Paid' ? 'bg-green-600 text-white' : '')}
+                                        >
+                                            {paymentStatusOptions.find(o => o.value === sale.paymentStatus)?.label || sale.paymentStatus}
+                                        </Badge>
+                                    </div>
+                                    
+                                    <div className="flex justify-between items-center text-[11px] text-muted-foreground px-1">
+                                        <div className="flex gap-2">
+                                            <span>#{sale.formNumber}</span>
+                                            <span>{sale.issueDate}</span>
+                                        </div>
+                                        <div className="font-bold font-mono text-foreground text-xs" dir="ltr">{fmt.format(sale.totalPrice || 0)}</div>
+                                    </div>
+                                    
+                                    <div className="flex justify-end gap-0.5 pt-1 mt-1 border-t border-muted/30">
+                                        {/* Receipt preview — single button, no dropdown on mobile */}
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-7 w-7 hover:bg-primary/10 hover:text-primary transition-colors"
+                                            onClick={() => setPreviewFormId(sale.id)}
+                                        >
+                                            <Eye className="h-3.5 w-3.5" />
+                                        </Button>
+
+                                        {/* Edit */}
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-7 w-7 hover:bg-blue-500/10 hover:text-blue-400 transition-colors"
+                                            onClick={() => setEditingFormId(sale.id)}
+                                        >
+                                            <Edit className="h-3.5 w-3.5 text-blue-500" />
+                                        </Button>
+
+                                        {/* Delete */}
+                                        <AlertDialog>
+                                            <AlertDialogTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    className="h-7 w-7 hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                                                >
+                                                    <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                                                </Button>
+                                            </AlertDialogTrigger>
+                                            <AlertDialogContent dir="rtl">
+                                                <AlertDialogHeader>
+                                                    <AlertDialogTitle>دڵنیایت؟</AlertDialogTitle>
+                                                    <AlertDialogDescription>ئەم کردارە پاشگەزبوونەوەی نییە.</AlertDialogDescription>
+                                                </AlertDialogHeader>
+                                                <AlertDialogFooter>
+                                                    <AlertDialogCancel>نەخێر</AlertDialogCancel>
+                                                    <AlertDialogAction onClick={() => handleDelete(sale.id)} className="bg-destructive">بەڵێ، بسڕەوە</AlertDialogAction>
+                                                </AlertDialogFooter>
+                                            </AlertDialogContent>
+                                        </AlertDialog>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </CardContent>
+
+                {/* ── Pagination footer ── */}
+                {!isLoadingSales && sortedSales.length > 0 && (
+                    <CardFooter className="flex-shrink-0 flex items-center justify-between border-t pt-4 flex-wrap gap-3">
+                        <p className="text-sm text-muted-foreground">
+                            {sortedSales.length} تۆمار — پەڕەی {currentPage} لە {totalPages}
+                        </p>
+                        <div className="flex items-center gap-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                                disabled={currentPage === 1}
+                                className="h-8 w-8 p-0"
+                                aria-label="پەڕەی پێشوو"
+                            >
+                                {/* In RTL, previous page = ChevronRight (pointing right = going back) */}
+                                <ChevronRight className="h-4 w-4" />
+                            </Button>
+
+                            {/* M-08: Hide page number pills on mobile screens */}
+                            <div className="hidden sm:flex items-center gap-1">
+                                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                                    .filter(p => p === 1 || p === totalPages || Math.abs(p - currentPage) <= 1)
+                                    .reduce<(number | 'ellipsis')[]>((acc, p, idx, arr) => {
+                                        if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push('ellipsis');
+                                        acc.push(p);
+                                        return acc;
+                                    }, [])
+                                    .map((p, idx) =>
+                                        p === 'ellipsis' ? (
+                                            <span key={`e-${idx}`} className="text-muted-foreground text-sm px-1">…</span>
+                                        ) : (
+                                            <Button
+                                                key={p}
+                                                variant={currentPage === p ? 'default' : 'outline'}
+                                                size="sm"
+                                                onClick={() => setCurrentPage(p as number)}
+                                                className="h-8 w-8 p-0 text-xs"
+                                            >
+                                                {p}
+                                            </Button>
+                                        )
+                                    )
+                                }
+                            </div>
+
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                                disabled={currentPage === totalPages}
+                                className="h-8 w-8 p-0"
+                                aria-label="پەڕەی داهاتوو"
+                            >
+                                <ChevronLeft className="h-4 w-4" />
+                            </Button>
+                        </div>
+                    </CardFooter>
+                )}
+            </Card>
+        </div>
+    );
+}
+
+// ── Page entry point ───────────────────────────────────────────────────────────
+export default function SalesPage({ params, searchParams }: { params: Promise<any>, searchParams: Promise<any> }) {
+    use(params);
+    use(searchParams);
+    return (
+        <div className="h-[calc(100vh-4rem)] md:h-[calc(100vh-4rem)] pb-20 md:pb-0 flex flex-col p-4 md:p-8 space-y-4 md:space-y-8 overflow-hidden" dir="rtl">
+            <SalesList />
+        </div>
+    );
+}

@@ -1,0 +1,1181 @@
+"use client";
+
+import React, { useState, useEffect } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm, useFieldArray, UseFormReturn } from "react-hook-form";
+import * as z from "zod";
+import { Button } from "@/components/ui/button";
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { PlusCircle, Trash2, List } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { format } from "date-fns";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useFirestore, doc, runTransaction, getDoc, collection, getDocs, useMemoFirebase, useCollection, orderBy, query, limit, serverTimestamp } from "@/firebase";
+import { DocumentReference } from "firebase/firestore";
+import { useToast } from "@/hooks/use-toast";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { DatePicker } from "@/components/ui/date-picker";
+import { ProductSelectorDialog } from "../../components/product-selector-dialog";
+import { CustomerSelectorDialog } from "../../components/customer-selector-dialog";
+import { Loader2 } from "lucide-react";
+import { useDebounce } from "@/hooks/use-debounce";
+import { WithId } from "@/firebase/firestore/use-collection";
+import { makeProductId } from "@/lib/inventory";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/contexts/auth-context";
+import { ConfidentialBlur } from "@/components/shared/confidential-blur";
+
+// ── Shared inventory ID generator used instead of local version ────────────────────────
+
+type Customer = {
+  customerName: string;
+  customerPhoneNumber?: string;
+  customerAddress?: string;
+};
+
+
+const salesFormSchema = z.object({
+  formNumber: z.string().min(1, "ژمارەی فۆڕم پێویستە."),
+  customerName: z.string().min(1, { message: "نووسینی ناوی کڕیار پێویستە." }),
+  customerPhoneNumber: z.string().optional(),
+  customerAddress: z.string().optional(),
+  issueDate: z.string().refine((val) => /^\d{4}-\d{2}-\d{2}$/.test(val), { message: "فۆرماتی بەروار هەڵەیە (YYYY-MM-DD)." }),
+  items: z.array(z.object({
+    product: z.string().min(1, "ناوی کاڵا پێویستە."),
+    quantity: z.coerce.number().min(1, "دانە دەبێت لانیکەم 1 بێت."),
+    unitPrice: z.coerce.number().min(0, "نرخ پێویستە."),
+    purchasePrice: z.coerce.number().optional().default(0),
+    sizeModel: z.string().optional(),
+    category: z.string().min(1, "پۆل پێویستە."),
+    discountPercent: z.coerce.number().optional().default(0),
+    maxDiscountPercent: z.coerce.number().optional().default(10),
+  })).min(1, { message: "لانیکەم یەک کاڵا پێویستە." }),
+  deliveryCost: z.coerce.number().optional().default(0),
+  deliveryCostCurrency: z.enum(["USD", "IQD"]).optional().default("USD"),
+  deliveryCostPayer: z.enum(["customer", "us", "both"]).optional().default("customer"),
+  deliveryCostCustomerShare: z.coerce.number().optional().default(0),
+  discountType: z.enum(["percentage", "cash"]).optional(),
+  discountValue: z.coerce.number().optional().default(0),
+  paymentStatus: z.enum(["Unpaid", "Partially Paid", "Fully Paid"]),
+  paymentType: z.enum(["After Delivery", "Installments", "Pre-order", "Direct Payment"]),
+  payments: z.array(z.object({
+      date: z.string().refine((val) => /^\d{4}-\d{2}-\d{2}$/.test(val), { message: "فۆرماتی بەروار هەڵەیە (YYYY-MM-DD)." }),
+      amount: z.coerce.number().min(0, "بڕ ناتوانێت سالب بێت."),
+      method: z.enum(["Cash", "Transfer"]),
+      note: z.string().optional(),
+  })).optional(),
+});
+
+type SalesFormValues = z.infer<typeof salesFormSchema>;
+
+type SalesFormProps = {
+    formId?: string | null;
+    onSave?: () => void;
+    initialItems?: any[];
+};
+
+
+function SalesFormItemRow({
+    form,
+    index,
+    remove,
+    fieldId,
+    mode = 'table',
+    userRole
+}: {
+    form: UseFormReturn<SalesFormValues>;
+    index: number;
+    remove: (index: number) => void;
+    fieldId: string;
+    mode?: 'table' | 'card';
+    userRole?: string;
+}) {
+    const [dialogOpen, setDialogOpen] = useState(false);
+    const watchedItem = form.watch(`items.${index}`);
+    const currencyFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+    const isAdminOrManager = userRole === 'Admin' || userRole === 'Data Manager';
+    const maxDiscount = Number(watchedItem?.maxDiscountPercent ?? 10);
+    const itemDiscountPercent = Number(watchedItem?.discountPercent || 0);
+    const rawLineTotal = Number(watchedItem?.quantity || 0) * Number(watchedItem?.unitPrice || 0);
+    const itemDiscountAmount = rawLineTotal * (itemDiscountPercent / 100);
+    const lineTotal = rawLineTotal - itemDiscountAmount;
+    
+    if (mode === 'card') {
+        return (
+            <Card className="md:hidden border-accent/20" key={`${fieldId}-mobile`}>
+                <CardHeader className="p-3 pb-2 border-b">
+                    <div className="flex justify-between items-center">
+                        <CardTitle className="text-sm font-bold">کاڵای #{index + 1}</CardTitle>
+                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => remove(index)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                    </div>
+                </CardHeader>
+                <CardContent className="p-3 space-y-3">
+                    <FormField
+                    control={form.control}
+                    name={`items.${index}.product`}
+                    render={({ field }) => (
+                        <FormItem className="space-y-1">
+                        <FormLabel className="text-xs">ناوی کاڵا</FormLabel>
+                        <div className="flex gap-2">
+                            <FormControl>
+                                <div className="flex flex-col gap-1 w-full">
+                                    <Input placeholder="ناوی کاڵا..." className="h-9 text-sm" {...field} />
+                                    {form.watch(`items.${index}.sizeModel`) && (
+                                        <span className="text-[11px] text-muted-foreground pr-1">({form.watch(`items.${index}.sizeModel`)})</span>
+                                    )}
+                                </div>
+                            </FormControl>
+                            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                            <DialogTrigger asChild>
+                                <Button variant="outline" size="sm" className="h-9 w-9 p-0"><List className="h-4 w-4" /></Button>
+                            </DialogTrigger>
+                            <DialogContent dir="rtl" className="sm:max-w-3xl">
+                                <DialogHeader>
+                                    <DialogTitle>لیستی کاڵاکان</DialogTitle>
+                                </DialogHeader>
+                                <ProductSelectorDialog onProductSelect={({name, sizeModel, price, purchasePrice, category, maxDiscountPercent}) => {
+                                    form.setValue(`items.${index}.product`, name);
+                                    form.setValue(`items.${index}.sizeModel`, sizeModel || "");
+                                    form.setValue(`items.${index}.unitPrice`, price);
+                                    form.setValue(`items.${index}.purchasePrice`, purchasePrice || 0);
+                                    form.setValue(`items.${index}.category`, category);
+                                    form.setValue(`items.${index}.maxDiscountPercent`, maxDiscountPercent ?? 10);
+                                    setDialogOpen(false);
+                                }} />
+                            </DialogContent>
+                            </Dialog>
+                        </div>
+                        <FormMessage />
+                        </FormItem>
+                    )}
+                    />
+                    <div className="grid grid-cols-3 gap-3">
+                        <FormField control={form.control} name={`items.${index}.quantity`} render={({ field }) => (<FormItem><FormLabel className="text-xs">دانە</FormLabel><FormControl><Input type="number" className="h-9 text-sm" {...field} /></FormControl><FormMessage className="text-[10px]" /></FormItem>)} />
+                        <FormField control={form.control} name={`items.${index}.unitPrice`} render={({ field }) => (<FormItem><FormLabel className="text-xs">نرخی تاک</FormLabel><FormControl><Input type="number" step="any" className="h-9 text-sm" {...field} /></FormControl><FormMessage className="text-[10px]" /></FormItem>)} />
+                        <FormField control={form.control} name={`items.${index}.discountPercent`} render={({ field }) => (<FormItem><FormLabel className="text-xs">داشکاندن %</FormLabel><FormControl><Input type="number" min={0} max={isAdminOrManager ? 100 : maxDiscount} step="1" className="h-9 text-sm" {...field} onChange={(e) => { const val = Number(e.target.value); field.onChange(isAdminOrManager ? val : Math.min(val, maxDiscount)); }} /></FormControl>{!isAdminOrManager && <span className="text-[9px] text-muted-foreground">حد: {maxDiscount}%</span>}<FormMessage className="text-[10px]" /></FormItem>)} />
+                    </div>
+                </CardContent>
+                <CardFooter className="bg-muted/30 p-2 px-3 flex justify-between items-center rounded-b-lg border-t">
+                    <span className="text-xs text-muted-foreground">نرخی کۆ:</span>
+                    <ConfidentialBlur><span className="font-bold text-sm text-primary">{currencyFormatter.format(lineTotal)}{itemDiscountPercent > 0 && <span className="text-[10px] text-destructive mr-1">(-{itemDiscountPercent}%)</span>}</span></ConfidentialBlur>
+                </CardFooter>
+            </Card>
+        );
+    }
+
+    return (
+        <TableRow key={fieldId} className="hidden md:table-row">
+            <TableCell className="align-top">
+                <FormField
+                  control={form.control}
+                  name={`items.${index}.product`}
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex gap-2">
+                        <FormControl>
+                            <div className="flex flex-col gap-1 w-full">
+                                <Input placeholder="ناوی کاڵا..." {...field} />
+                                {form.watch(`items.${index}.sizeModel`) && (
+                                    <span className="text-xs text-muted-foreground pr-2">({form.watch(`items.${index}.sizeModel`)})</span>
+                                )}
+                            </div>
+                        </FormControl>
+                        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+                          <DialogTrigger asChild>
+                            <Button variant="outline" size="icon"><List className="h-4 w-4" /></Button>
+                          </DialogTrigger>
+                          <DialogContent dir="rtl" className="sm:max-w-3xl">
+                              <DialogHeader>
+                                  <DialogTitle>لیستی کاڵاکان</DialogTitle>
+                              </DialogHeader>
+                              <ProductSelectorDialog onProductSelect={({name, sizeModel, price, purchasePrice, category, maxDiscountPercent}) => {
+                                  form.setValue(`items.${index}.product`, name);
+                                  form.setValue(`items.${index}.sizeModel`, sizeModel || "");
+                                  form.setValue(`items.${index}.unitPrice`, price);
+                                  form.setValue(`items.${index}.purchasePrice`, purchasePrice || 0);
+                                  form.setValue(`items.${index}.category`, category);
+                                  form.setValue(`items.${index}.maxDiscountPercent`, maxDiscountPercent ?? 10);
+                                  setDialogOpen(false);
+                              }} />
+                          </DialogContent>
+                        </Dialog>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+            </TableCell>
+            <TableCell className="align-top">
+                <FormField control={form.control} name={`items.${index}.quantity`} render={({ field }) => (<FormItem><FormControl><Input type="number" {...field} /></FormControl><FormMessage /></FormItem>)} />
+            </TableCell>
+            <TableCell className="align-top">
+                <FormField control={form.control} name={`items.${index}.unitPrice`} render={({ field }) => (<FormItem><FormControl><Input type="number" step="any" {...field} /></FormControl><FormMessage /></FormItem>)} />
+            </TableCell>
+            <TableCell className="align-top">
+                <FormField control={form.control} name={`items.${index}.discountPercent`} render={({ field }) => (
+                    <FormItem>
+                        <FormControl>
+                            <div className="flex flex-col items-center gap-0.5">
+                                <Input type="number" min={0} max={isAdminOrManager ? 100 : maxDiscount} step="1" className="w-20" {...field} onChange={(e) => { const val = Number(e.target.value); field.onChange(isAdminOrManager ? val : Math.min(val, maxDiscount)); }} />
+                                {!isAdminOrManager && <span className="text-[10px] text-muted-foreground">حد: {maxDiscount}%</span>}
+                            </div>
+                        </FormControl>
+                        <FormMessage />
+                    </FormItem>
+                )} />
+            </TableCell>
+             <TableCell className="align-top pt-5 font-semibold text-left">
+                <ConfidentialBlur>
+                    <div>{currencyFormatter.format(lineTotal)}</div>
+                    {itemDiscountPercent > 0 && <div className="text-[10px] text-destructive font-normal">-{itemDiscountPercent}%</div>}
+                </ConfidentialBlur>
+            </TableCell>
+            <TableCell className="align-top">
+                <Button variant="ghost" size="icon" onClick={() => remove(index)}>
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+            </TableCell>
+        </TableRow>
+    );
+}
+
+export function SalesForm({ formId, onSave, initialItems }: SalesFormProps) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [isLoading, setIsLoading] = useState(false);
+  const [originalItems, setOriginalItems] = useState<any[]>([]);
+  const [isCustomerDialogOpen, setIsCustomerDialogOpen] = useState(false);
+  const [autoGeneratedNumber, setAutoGeneratedNumber] = useState<string>("");
+  const { user } = useAuth();
+
+  const form = useForm<SalesFormValues>({
+    resolver: zodResolver(salesFormSchema),
+    defaultValues: {
+      formNumber: "0",
+      customerName: "",
+      customerPhoneNumber: "",
+      customerAddress: "",
+      issueDate: format(new Date(), "yyyy-MM-dd"),
+      items: initialItems || [{ product: "", quantity: 1, unitPrice: 0, purchasePrice: 0, sizeModel: "", category: 'Mattress', discountPercent: 0, maxDiscountPercent: 10 }],
+      deliveryCost: 0,
+      deliveryCostCurrency: "USD",
+      deliveryCostPayer: "customer",
+      deliveryCostCustomerShare: 0,
+      discountValue: 0,
+      paymentStatus: "Fully Paid",
+      paymentType: "Direct Payment",
+      payments: [],
+    },
+  });
+
+  const customersQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return collection(firestore, 'customers');
+  }, [firestore]);
+  const { data: customers } = useCollection<Customer>(customersQuery);
+
+  const customerNameValue = form.watch('customerName');
+  const debouncedCustomerName = useDebounce(customerNameValue, 300);
+
+  useEffect(() => {
+      if (debouncedCustomerName && customers) {
+          const foundCustomer = customers.find(c => c.customerName.toLowerCase() === debouncedCustomerName.toLowerCase());
+          if (foundCustomer) {
+              form.setValue('customerPhoneNumber', foundCustomer.customerPhoneNumber || '');
+              form.setValue('customerAddress', foundCustomer.customerAddress || '');
+          }
+      }
+  }, [debouncedCustomerName, customers, form]);
+
+  const paymentType = form.watch('paymentType');
+  const discountType = form.watch('discountType');
+  const watchedItems = form.watch('items');
+  const deliveryCost = form.watch('deliveryCost');
+  const deliveryCostCurrency = form.watch('deliveryCostCurrency');
+  const deliveryCostPayer = form.watch('deliveryCostPayer');
+  const deliveryCostCustomerShare = form.watch('deliveryCostCustomerShare');
+  const watchedPayments = form.watch('payments');
+  const discountValue = form.watch('discountValue');
+
+  const subTotalBeforeProductDiscount = watchedItems.reduce((acc, item) => acc + (Number(item.quantity || 0) * Number(item.unitPrice || 0)), 0);
+  const totalProductDiscount = watchedItems.reduce((acc, item) => {
+    const raw = Number(item.quantity || 0) * Number(item.unitPrice || 0);
+    return acc + (raw * (Number(item.discountPercent || 0) / 100));
+  }, 0);
+  const subTotal = subTotalBeforeProductDiscount - totalProductDiscount;
+
+  const discountAmount = React.useMemo(() => {
+    if (discountType === 'percentage') return subTotal * ((Number(discountValue) || 0) / 100);
+    return Number(discountValue) || 0;
+  }, [discountType, discountValue, subTotal]);
+
+  const totalAfterDiscount = subTotal - discountAmount;
+  const totalAmount = totalAfterDiscount + Number(deliveryCost || 0);
+  const totalPaid = watchedPayments?.reduce((acc, p) => acc + (Number(p.amount) || 0), 0) || 0;
+  
+  const remainingBalance = Math.max(0, totalAmount - totalPaid);
+  const overpayment = Math.max(0, totalPaid - totalAmount);
+
+   useEffect(() => {
+        if (!discountType) {
+            form.setValue('discountValue', 0);
+        }
+    }, [discountType, form]);
+
+    useEffect(() => {
+        if (paymentType === 'Direct Payment' || paymentType === 'Pre-order') {
+            form.setValue('paymentStatus', 'Fully Paid');
+        } else if (paymentType === 'After Delivery') {
+            form.setValue('paymentStatus', 'Unpaid');
+        } else if (paymentType === 'Installments') {
+            if (totalPaid === 0) {
+                form.setValue('paymentStatus', 'Unpaid');
+            } else if (totalPaid >= totalAmount) {
+                form.setValue('paymentStatus', 'Fully Paid');
+            } else {
+                form.setValue('paymentStatus', 'Partially Paid');
+            }
+        }
+    }, [paymentType, form, totalPaid, totalAmount]);
+
+
+  // D-02: Form number is now generated atomically inside onSubmit transaction.
+  // This prevents race conditions when two users create forms simultaneously.
+  useEffect(() => {
+    async function fetchMaxFormNumber() {
+      if (!formId && firestore) {
+        try {
+          const formsRef = collection(firestore, 'selling_forms');
+          const q = query(formsRef, orderBy('issueDate', 'desc'), limit(1));
+          const querySnapshot = await getDocs(q);
+          
+          let maxNum = 0;
+          querySnapshot.forEach((doc) => {
+            const num = parseInt(doc.data().formNumber || "0");
+            if (!isNaN(num) && num > maxNum) {
+              maxNum = num;
+            }
+          });
+          
+          // Set as initial preview; actual number set atomically in onSubmit
+          const nextNum = String(maxNum + 1);
+          form.setValue('formNumber', nextNum);
+          setAutoGeneratedNumber(nextNum);
+        } catch (error) {
+          console.error("Error fetching max form number:", error);
+        }
+      }
+    }
+    fetchMaxFormNumber();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formId, firestore]);
+
+
+  useEffect(() => {
+    async function fetchFormData() {
+      if (formId && firestore) {
+        setIsLoading(true);
+        try {
+          const formRef = doc(firestore, 'selling_forms', formId);
+          const formSnap = await getDoc(formRef);
+
+          if (formSnap.exists()) {
+            const data = formSnap.data();
+            
+            const itemsRef = collection(firestore, `selling_forms/${formId}/selling_form_products`);
+            const itemsSnap = await getDocs(itemsRef);
+            const items = itemsSnap.docs.map(d => ({...d.data()}));
+            
+            const paymentsRef = collection(firestore, `selling_forms/${formId}/payments`);
+            const paymentsSnap = await getDocs(paymentsRef);
+            const payments = paymentsSnap.docs.map(d => ({
+                ...d.data(),
+                date: d.data().paymentDate,
+                amount: d.data().amountPaid
+            })) as any[];
+
+            const normalizeDate = (dateVal: any) => {
+              if (!dateVal) return format(new Date(), "yyyy-MM-dd");
+              if (typeof dateVal === 'string') {
+                  if (/^\d{4}-\d{2}-\d{2}$/.test(dateVal)) return dateVal;
+                  try { return format(new Date(dateVal), "yyyy-MM-dd"); } catch { return dateVal; }
+              }
+              if (dateVal.toDate) return format(dateVal.toDate(), "yyyy-MM-dd");
+              if (dateVal instanceof Date) return format(dateVal, "yyyy-MM-dd");
+              return dateVal;
+            };
+
+            setOriginalItems(items); // Store original items for stock calculation
+
+            form.reset({
+              ...data,
+              formNumber: String(data.formNumber || ""),
+              issueDate: normalizeDate(data.issueDate),
+              customerName: data.customerName || "",
+              customerPhoneNumber: data.customerPhoneNumber || data.customerPhone || "", 
+              customerAddress: data.customerAddress || "",
+              items: items.map(item => ({
+                  product: item.productName || item.product || "",
+                  quantity: Number(item.quantity) || 0,
+                  unitPrice: Number(item.unitPrice) || 0,
+                  purchasePrice: Number(item.purchasePrice) || 0,
+                  sizeModel: item.sizeModel || "",
+                  category: item.category || "Mattress",
+                  discountPercent: Number(item.discountPercent) || 0,
+                  maxDiscountPercent: Number(item.maxDiscountPercent) || 10,
+              })),
+              payments: payments.map(p => ({
+                date: normalizeDate(p.date),
+                amount: Number(p.amount) || 0,
+                method: p.method || "Cash",
+                note: p.note || ""
+              })) as any,
+            });
+
+          }
+        } catch (error) {
+          console.error("Error fetching form data:", error);
+          toast({ variant: 'destructive', title: "هەڵە لە هێنانی داتا" });
+        } finally {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    fetchFormData();
+  }, [formId, firestore, form, toast]);
+
+
+  const { fields, append, remove } = useFieldArray({
+    control: form.control,
+    name: "items",
+  });
+  
+  const { fields: paymentFields, append: appendPayment, remove: removePayment } = useFieldArray({
+    control: form.control,
+    name: "payments",
+  });
+  
+  const currencyFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+  
+  async function onSubmit(data: SalesFormValues) {
+    if (!firestore) {
+      toast({ variant: "destructive", title: "هەڵەیەک ڕوویدا", description: "پەیوەندی لەگەڵ بنکەی داتاکەدا نییە." });
+      return;
+    }
+    
+    // Sanitize payment amounts to ensure they are numbers
+    const sanitizedPayments = data.payments?.map(p => ({ ...p, amount: Number(p.amount) || 0 })) || [];
+    const sanitizedData = { ...data, payments: sanitizedPayments };
+
+    const sellingFormRef = formId ? doc(firestore, "selling_forms", formId) : doc(collection(firestore, "selling_forms"));
+    const sellingFormId = sellingFormRef.id;
+
+    const productRefsToDelete: DocumentReference[] = [];
+    const paymentRefsToDelete: DocumentReference[] = [];
+
+    if (formId) {
+        try {
+            const existingProductsSnap = await getDocs(collection(firestore, `selling_forms/${formId}/selling_form_products`));
+            existingProductsSnap.forEach(doc => productRefsToDelete.push(doc.ref));
+
+            const existingPaymentsSnap = await getDocs(collection(firestore, `selling_forms/${formId}/payments`));
+            existingPaymentsSnap.forEach(doc => paymentRefsToDelete.push(doc.ref));
+        } catch (error) {
+            console.error("Error fetching old items for deletion:", error);
+            toast({ variant: 'destructive', title: 'هەڵە لە خوێندنەوەی داتای کۆن', description: "نەتوانرا داتای پێشوو بسڕدرێتەوە." });
+            return;
+        }
+    }
+    
+    // D-02: For new forms, determine formNumber based on manual entry vs auto
+    let resolvedFormNumber = data.formNumber;
+    if (!formId && data.formNumber === autoGeneratedNumber) {
+        // Not manually changed from the system preview, so atomically give last + 1
+        try {
+            const formsRef = collection(firestore, 'selling_forms');
+            const q = query(formsRef, orderBy('issueDate', 'desc'), limit(1));
+            const snap = await getDocs(q);
+            let maxNum = 0;
+            snap.forEach(d => {
+                const num = parseInt(d.data().formNumber || "0");
+                if (!isNaN(num) && num > maxNum) maxNum = num;
+            });
+            resolvedFormNumber = String(maxNum + 1);
+        } catch (error) {
+            console.warn('Could not atomically resolve formNumber, using preview value:', error);
+        }
+    }
+    
+    try {
+      await runTransaction(firestore, async (transaction) => {
+        const productRefsToRead = new Map<string, DocumentReference>();
+
+        if (formId) {
+          originalItems.forEach((item) => {
+            if (item.productId) productRefsToRead.set(item.productId, doc(firestore, 'products', item.productId));
+          });
+        }
+        
+        sanitizedData.items.forEach(item => {
+          const showroomId = makeProductId(item.product, item.sizeModel, 'Shop Showroom');
+          const warehouseId = makeProductId(item.product, item.sizeModel, 'Warehouse');
+          productRefsToRead.set(showroomId, doc(firestore, 'products', showroomId));
+          productRefsToRead.set(warehouseId, doc(firestore, 'products', warehouseId));
+        });
+
+        // ── ALL READS MUST COME BEFORE ALL WRITES ──
+        const productSnaps = await Promise.all(
+          Array.from(productRefsToRead.values()).map(ref => transaction.get(ref))
+        );
+        const productDocs = new Map(productSnaps.map(snap => [snap.id, snap]));
+
+        // ── NOW WE CAN START WRITING ──
+        
+        // Auto-save new customer if they don't exist
+        if (sanitizedData.customerName) {
+            const customerExists = customers?.some(c => c.customerName.trim().toLowerCase() === sanitizedData.customerName.trim().toLowerCase());
+            if (!customerExists) {
+                const newCustomerRef = doc(collection(firestore, 'customers'));
+                transaction.set(newCustomerRef, {
+                    id: newCustomerRef.id,
+                    customerName: sanitizedData.customerName.trim(),
+                    customerPhoneNumber: sanitizedData.customerPhoneNumber || "",
+                    customerAddress: sanitizedData.customerAddress || "",
+                    createdAt: serverTimestamp()
+                });
+            }
+        }
+
+        const stockChanges = new Map<string, { change: number, resolvedId: string | null }>();
+
+        if (formId) {
+          originalItems.forEach(item => {
+            if (item.productId) {
+              stockChanges.set(item.productId, { change: Number(item.quantity || 0), resolvedId: item.productId });
+            }
+          });
+        }
+
+        const finalItems: any[] = [];
+
+        for (const item of sanitizedData.items) {
+          const showroomId = makeProductId(item.product, item.sizeModel, 'Shop Showroom');
+          const warehouseId = makeProductId(item.product, item.sizeModel, 'Warehouse');
+          
+          const showroomDoc = productDocs.get(showroomId);
+          const warehouseDoc = productDocs.get(warehouseId);
+
+          const showroomCurrentStock = Number(showroomDoc?.exists() ? (showroomDoc.data() as any).currentQuantity : 0);
+          const warehouseCurrentStock = Number(warehouseDoc?.exists() ? (warehouseDoc.data() as any).currentQuantity : 0);
+          
+          const showroomStockAfterRestore = showroomCurrentStock + (stockChanges.get(showroomId)?.change || 0);
+          const warehouseStockAfterRestore = warehouseCurrentStock + (stockChanges.get(warehouseId)?.change || 0);
+          
+          let remainingQty = Number(item.quantity);
+          const totalAvailable = showroomStockAfterRestore + warehouseStockAfterRestore;
+
+          if (totalAvailable < remainingQty) {
+              throw new Error(`بڕی بەشی ناکات بۆ کاڵای: "${item.product}". بڕی بەردەست: ${totalAvailable}`);
+          }
+
+          if (showroomStockAfterRestore > 0 && remainingQty > 0) {
+              const takeFromShowroom = Math.min(showroomStockAfterRestore, remainingQty);
+              const currentChange = stockChanges.get(showroomId)?.change || 0;
+              stockChanges.set(showroomId, { change: currentChange - takeFromShowroom, resolvedId: showroomId });
+              remainingQty -= takeFromShowroom;
+              finalItems.push({ ...item, quantity: takeFromShowroom, resolvedProductId: showroomId });
+          }
+
+          if (warehouseStockAfterRestore > 0 && remainingQty > 0) {
+              const takeFromWarehouse = Math.min(warehouseStockAfterRestore, remainingQty);
+              const currentChange = stockChanges.get(warehouseId)?.change || 0;
+              stockChanges.set(warehouseId, { change: currentChange - takeFromWarehouse, resolvedId: warehouseId });
+              remainingQty -= takeFromWarehouse;
+              finalItems.push({ ...item, quantity: takeFromWarehouse, resolvedProductId: warehouseId });
+          }
+        }
+        
+        sanitizedData.items = finalItems;
+
+        for (const [productId, { change }] of stockChanges.entries()) {
+          const productRef = productRefsToRead.get(productId)!;
+          const productDoc = productDocs.get(productId);
+
+          if (productDoc?.exists()) {
+            const currentQuantity = Number((productDoc.data() as any)!.currentQuantity);
+            transaction.update(productRef, { currentQuantity: currentQuantity + change });
+          }
+        }
+        
+        const { items, payments, ...mainData } = sanitizedData;
+
+        // Recalculate totals inside the transaction for consistency
+        const rawSubTotal = items.reduce((acc, item) => acc + (Number(item.quantity) * Number(item.unitPrice)), 0);
+        const productDiscountTotal = items.reduce((acc, item) => {
+            const raw = Number(item.quantity) * Number(item.unitPrice);
+            return acc + (raw * (Number(item.discountPercent || 0) / 100));
+        }, 0);
+        const subTotal = rawSubTotal - productDiscountTotal;
+        const dVal = Number(mainData.discountValue || 0);
+        const discountAmount = (() => {
+            if (!mainData.discountType || dVal === 0) return 0;
+            if (mainData.discountType === 'percentage') {
+                return (subTotal * dVal) / 100;
+            }
+            return dVal;
+        })();
+        const effectiveDeliveryInsideTransaction = mainData.deliveryCostCurrency === 'IQD' ? 0 
+            : mainData.deliveryCostPayer === 'us' ? 0 
+            : mainData.deliveryCostPayer === 'both' ? Number(mainData.deliveryCostCustomerShare || 0) 
+            : Number(mainData.deliveryCost || 0);
+
+        const finalTotalAmount = subTotal - discountAmount + effectiveDeliveryInsideTransaction;
+        const finalTotalPaid = payments?.reduce((acc, p) => acc + Number(p.amount || 0), 0) || 0;
+        const finalRemainingBalance = Math.max(0, finalTotalAmount - finalTotalPaid);
+        const creatorName = user?.name || "System";
+        const creatorId = user?.id || "system"; 
+        
+        const sellingFormData: any = { 
+            ...mainData, 
+            id: sellingFormId, 
+            formNumber: resolvedFormNumber,
+            creatorId: creatorId,
+            creatorName,
+            issueDate: sanitizedData.issueDate, 
+            totalPrice: Number(finalTotalAmount), 
+            remainingBalance: Number(finalRemainingBalance),
+            discountValue: Number(dVal),
+            deliveryCost: Number(mainData.deliveryCost || 0),
+            deliveryCostCurrency: mainData.deliveryCostCurrency,
+            deliveryCostPayer: mainData.deliveryCostPayer,
+            deliveryCostCustomerShare: Number(mainData.deliveryCostCustomerShare || 0)
+        };
+        
+        if (!sellingFormData.discountType) delete sellingFormData.discountType;
+        transaction.set(sellingFormRef, sellingFormData, { merge: true });
+
+        productRefsToDelete.forEach(ref => transaction.delete(ref));
+        paymentRefsToDelete.forEach(ref => transaction.delete(ref));
+
+        items.forEach(item => {
+          const productSubCollectionRef = doc(collection(firestore, `selling_forms/${sellingFormId}/selling_form_products`));
+          const rawLineTotal = Number(item.quantity) * Number(item.unitPrice);
+          const itemDiscountAmount = rawLineTotal * (Number(item.discountPercent || 0) / 100);
+          const lineTotal = rawLineTotal - itemDiscountAmount;
+          transaction.set(productSubCollectionRef, {
+            id: productSubCollectionRef.id,
+            sellingFormId: sellingFormId,
+            productId: (item as any).resolvedProductId,
+            productName: item.product,
+            sizeModel: item.sizeModel || "",
+            quantity: Number(item.quantity),
+            unitPrice: Number(item.unitPrice),
+            purchasePrice: Number(item.purchasePrice || 0),
+            lineTotal: Number(lineTotal),
+            discountPercent: Number(item.discountPercent || 0),
+            category: item.category,
+          });
+        });
+
+        if (sanitizedData.paymentType === 'Installments' && payments) {
+          payments.forEach(payment => {
+            const paymentRef = doc(collection(firestore, `selling_forms/${sellingFormId}/payments`));
+            transaction.set(paymentRef, {
+              id: paymentRef.id,
+              sellingFormId: sellingFormId,
+              paymentDate: payment.date,
+              amountPaid: Number(payment.amount),
+              paymentMethod: payment.method,
+              note: payment.note,
+            });
+          });
+        }
+      });
+
+      toast({ title: "سەرکەوتوو بوو!", description: `فۆڕمی فرۆشتن بە سەرکەوتوویی ${formId ? 'نوێکرایەوە' : 'پاشەکەوت کرا'}.`, className: "bg-accent text-accent-foreground", });
+      if (onSave) onSave();
+      if (!formId) form.reset();
+
+    } catch (error: any) {
+      console.error("Error saving sales form:", error);
+      toast({ variant: "destructive", title: "هەڵەیەک ڕوویدا", description: error.message || "پاشەکەوتکردنی فۆڕمی فرۆشتن سەرکەوتوو نەبوو.", });
+    }
+  }
+
+
+  if (isLoading) {
+    return <div className="flex h-96 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin" /></div>;
+  }
+
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col space-y-4" dir="rtl">
+        <Card>
+            <CardHeader className="flex flex-col md:flex-row justify-between items-start p-3 sm:p-4 gap-3 sm:gap-4">
+                 <FormField
+                    control={form.control}
+                    name="formNumber"
+                    render={({ field }) => (
+                        <FormItem className="flex items-center gap-2">
+                        <FormLabel className="font-bold text-base sm:text-lg mt-1">No.</FormLabel>
+                        <FormControl><Input className="w-20 sm:w-24 h-9 sm:h-10 font-bold text-base sm:text-lg" {...field} /></FormControl>
+                        <FormMessage />
+                        </FormItem>
+                    )}
+                 />
+                 <FormField
+                    control={form.control}
+                    name="issueDate"
+                    render={({ field }) => (
+                        <FormItem className="flex items-center gap-2">
+                            <FormLabel className="mt-1 text-sm sm:text-base">بەروار:</FormLabel>
+                            <FormControl>
+                                <DatePicker value={field.value} onChange={field.onChange} className="w-[140px] sm:w-[180px] h-9 sm:h-10" />
+                            </FormControl>
+                            <FormMessage />
+                        </FormItem>
+                    )}
+                />
+            </CardHeader>
+        </Card>
+
+        <Card>
+            <CardHeader className="p-2 sm:p-4"><CardTitle className="text-base sm:text-xl">زانیاری کڕیار</CardTitle></CardHeader>
+            <CardContent className="p-2 sm:p-4 pt-0 sm:pt-0 space-y-3 sm:space-y-4">
+                 <div className="flex flex-col md:flex-row items-start gap-3 sm:gap-4">
+                    <FormField
+                    control={form.control}
+                    name="customerName"
+                    render={({ field }) => (
+                        <FormItem className="flex-1 w-full space-y-1">
+                        <FormLabel className="text-xs sm:text-sm">بەڕێز</FormLabel>
+                            <div className="flex gap-2">
+                                <FormControl>
+                                    <Input className="h-9 sm:h-10 text-sm sm:text-base" {...field} />
+                                </FormControl>
+                                <Dialog open={isCustomerDialogOpen} onOpenChange={setIsCustomerDialogOpen}>
+                                    <DialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="h-9 sm:h-10 w-9 sm:w-10 p-0"><List className="h-4 w-4" /></Button>
+                                    </DialogTrigger>
+                                    <DialogContent dir="rtl" className="sm:max-w-3xl">
+                                        <DialogHeader>
+                                            <DialogTitle>لیستی کڕیارەکان</DialogTitle>
+                                        </DialogHeader>
+                                        <CustomerSelectorDialog onCustomerSelect={(customer) => {
+                                            form.setValue('customerName', customer.customerName);
+                                            form.setValue('customerPhoneNumber', customer.customerPhoneNumber);
+                                            form.setValue('customerAddress', customer.customerAddress);
+                                            setIsCustomerDialogOpen(false);
+                                        }} />
+                                    </DialogContent>
+                                </Dialog>
+                            </div>
+                        <FormMessage className="text-[10px]" />
+                        </FormItem>
+                    )}
+                    />
+                    <FormField control={form.control} name="customerPhoneNumber" render={({ field }) => ( <FormItem className="flex-1 w-full space-y-1"> <FormLabel className="text-xs sm:text-sm">ژ. مۆبایل</FormLabel> <FormControl><Input className="h-9 sm:h-10 text-sm sm:text-base" {...field} /></FormControl> <FormMessage className="text-[10px]" /> </FormItem> )} />
+                </div>
+                <FormField control={form.control} name="customerAddress" render={({ field }) => ( <FormItem className="space-y-1"> <FormLabel className="text-xs sm:text-sm">ناونیشان</FormLabel> <FormControl><Input className="h-9 sm:h-10 text-sm sm:text-base" {...field} /></FormControl> <FormMessage className="text-[10px]" /> </FormItem> )} />
+            </CardContent>
+        </Card>
+        
+        <Card>
+            <CardHeader className="p-2 sm:p-4 pb-2 sm:pb-3"><CardTitle className="text-base sm:text-xl">کاڵا فرۆشراوەکان</CardTitle></CardHeader>
+            <CardContent className="p-2 sm:p-4 pt-0 sm:pt-0 max-h-[350px] overflow-y-auto">
+                 {/* Desktop Table */}
+                <Table className="hidden md:table">
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead className="w-[30%] text-right">کاڵا</TableHead>
+                            <TableHead className="text-center">دانە</TableHead>
+                            <TableHead className="text-center">نرخی تاک</TableHead>
+                            <TableHead className="text-center">داشکاندن %</TableHead>
+                            <TableHead className="text-left">نرخی کۆ</TableHead>
+                            <TableHead></TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                        {fields.map((field, index) => (
+                            <SalesFormItemRow
+                                key={field.id}
+                                fieldId={field.id}
+                                form={form}
+                                index={index}
+                                remove={() => fields.length > 1 && remove(index)}
+                                mode="table"
+                                userRole={user?.role}
+                            />
+                        ))}
+                    </TableBody>
+                </Table>
+                 {/* Mobile Cards */}
+                 <div className="space-y-4 md:hidden">
+                     {fields.map((field, index) => (
+                        <SalesFormItemRow
+                            key={field.id}
+                            fieldId={field.id}
+                            form={form}
+                            index={index}
+                            remove={() => fields.length > 1 && remove(index)}
+                            mode="card"
+                            userRole={user?.role}
+                        />
+                    ))}
+                 </div>
+                <Button type="button" variant="outline" size="sm" className="mt-4" onClick={() => append({ product: "", quantity: 1, unitPrice: 0, purchasePrice: 0, sizeModel: "", category: 'Mattress', discountPercent: 0, maxDiscountPercent: 10 })}>
+                    <PlusCircle className="mr-2 h-4 w-4" />
+                    زیادکردنی کاڵا
+                </Button>
+            </CardContent>
+        </Card>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+            <Card>
+                <CardHeader className="p-2 sm:p-4"><CardTitle className="text-base sm:text-xl">دارایی</CardTitle></CardHeader>
+                <CardContent className="p-2 sm:p-4 pt-0 sm:pt-0 space-y-3 sm:space-y-4">
+                     <div className="space-y-1 sm:space-y-2">
+                        <FormLabel className="text-xs sm:text-sm">داشکاندن</FormLabel>
+                        <div className="flex gap-4 items-center">
+                            <FormField
+                                control={form.control}
+                                name="discountType"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-3">
+                                    <FormControl>
+                                        <RadioGroup
+                                        onValueChange={field.onChange}
+                                        value={field.value}
+                                        className="flex items-center space-x-2 space-x-reverse"
+                                        dir="rtl"
+                                        >
+                                        <FormItem className="flex items-center space-x-1 space-x-reverse">
+                                            <FormControl><RadioGroupItem value="percentage" /></FormControl>
+                                            <FormLabel className="font-normal">%</FormLabel>
+                                        </FormItem>
+                                        <FormItem className="flex items-center space-x-1 space-x-reverse">
+                                            <FormControl><RadioGroupItem value="cash" /></FormControl>
+                                            <FormLabel className="font-normal">بڕی دیاریکراو</FormLabel>
+                                        </FormItem>
+                                        </RadioGroup>
+                                    </FormControl>
+                                    <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={form.control}
+                                name="discountValue"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormControl>
+                                            <Input type="number" step="any" {...field} disabled={!discountType} className="w-24 sm:w-32 h-9 sm:h-10 text-sm sm:text-base" />
+                                        </FormControl>
+                                        <FormMessage className="text-[10px]" />
+                                    </FormItem>
+                                )}
+                            />
+                        </div>
+                    </div>
+                    <div className="space-y-3 p-3 bg-muted/10 rounded-md border">
+                        <div className="flex justify-between items-center">
+                            <FormLabel className="text-sm font-semibold">تێچووی گەیاندن</FormLabel>
+                        </div>
+                        
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <FormField
+                                control={form.control}
+                                name="deliveryCost"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1">
+                                        <FormLabel className="text-xs">بڕی تێچوو</FormLabel>
+                                        <FormControl>
+                                            <Input type="number" step="any" className="h-9 text-sm text-left" dir="ltr" {...field} />
+                                        </FormControl>
+                                        <FormMessage className="text-[10px]" />
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={form.control}
+                                name="deliveryCostCurrency"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1">
+                                        <FormLabel className="text-xs">دراو</FormLabel>
+                                        <Select onValueChange={field.onChange} value={field.value} dir="rtl">
+                                            <FormControl><SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger></FormControl>
+                                            <SelectContent>
+                                                <SelectItem value="USD">دۆلار ($)</SelectItem>
+                                                <SelectItem value="IQD">دینار (IQD)</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </FormItem>
+                                )}
+                            />
+                        </div>
+                        
+                        <FormField
+                            control={form.control}
+                            name="deliveryCostPayer"
+                            render={({ field }) => (
+                                <FormItem className="space-y-2">
+                                    <FormLabel className="text-xs">لەلایەن کێوە دەدرێت؟</FormLabel>
+                                    <FormControl>
+                                        <RadioGroup onValueChange={field.onChange} value={field.value} className="flex flex-col gap-2">
+                                            <div className="flex items-center gap-2 space-x-reverse"><RadioGroupItem value="customer" id="payer-customer" /><label htmlFor="payer-customer" className="text-xs cursor-pointer">هەمووی لەلایەن کڕیارەوە دراوە</label></div>
+                                            <div className="flex items-center gap-2 space-x-reverse"><RadioGroupItem value="us" id="payer-us" /><label htmlFor="payer-us" className="text-xs cursor-pointer">هەمووی لەلایەن ئێمەوە دراوە</label></div>
+                                            <div className="flex items-center gap-2 space-x-reverse"><RadioGroupItem value="both" id="payer-both" /><label htmlFor="payer-both" className="text-xs cursor-pointer">لە هەردوو لاوە دراوە</label></div>
+                                        </RadioGroup>
+                                    </FormControl>
+                                </FormItem>
+                            )}
+                        />
+
+                        {deliveryCostPayer === 'both' && (
+                            <FormField
+                                control={form.control}
+                                name="deliveryCostCustomerShare"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1 pt-2">
+                                        <FormLabel className="text-xs text-primary">بەشی کڕیار لەم تێچووە</FormLabel>
+                                        <FormControl>
+                                            <Input type="number" step="any" className="h-9 text-sm text-left border-primary/50" dir="ltr" {...field} />
+                                        </FormControl>
+                                        <FormMessage className="text-[10px]" />
+                                    </FormItem>
+                                )}
+                            />
+                        )}
+                    </div>
+                     <div className="grid grid-cols-2 gap-3 sm:gap-4 items-end">
+                    <FormField
+                        control={form.control}
+                        name="paymentType"
+                        render={({ field }) => (
+                        <FormItem className="space-y-1">
+                            <FormLabel className="text-xs sm:text-sm">جۆری پارەدان</FormLabel>
+                            <Select onValueChange={field.onChange} value={field.value} dir="rtl">
+                            <FormControl><SelectTrigger className="h-9 sm:h-10 text-sm sm:text-base"><SelectValue /></SelectTrigger></FormControl>
+                            <SelectContent>
+                                <SelectItem value="Direct Payment">پارەی ڕاستەوخۆ</SelectItem>
+                                <SelectItem value="After Delivery">دوای گەیاندن</SelectItem>
+                                <SelectItem value="Installments">قیست</SelectItem>
+                                <SelectItem value="Pre-order">داواکاری پێشوەختە</SelectItem>
+                            </SelectContent>
+                            </Select>
+                            <FormMessage className="text-[10px]" />
+                        </FormItem>
+                        )}
+                    />
+                        <FormField
+                            control={form.control}
+                            name="paymentStatus"
+                            render={({ field }) => (
+                            <FormItem className="space-y-1">
+                                <FormLabel className="text-xs sm:text-sm">دۆخی پارەدان</FormLabel>
+                                <Select onValueChange={field.onChange} value={field.value} dir="rtl" disabled={paymentType !== 'Installments'}>
+                                <FormControl><SelectTrigger className="h-9 sm:h-10 text-sm sm:text-base"><SelectValue/></SelectTrigger></FormControl>
+                                <SelectContent>
+                                    <SelectItem value="Fully Paid">هەمووی دراوە</SelectItem>
+                                    <SelectItem value="Partially Paid">بەشێکی دراوە</SelectItem>
+                                    <SelectItem value="Unpaid">نەدراوە</SelectItem>
+                                </SelectContent>
+                                </Select>
+                                <FormMessage className="text-[10px]" />
+                            </FormItem>
+                            )}
+                        />
+                    </div>
+                </CardContent>
+            </Card>
+             <Card>
+                <CardHeader className="p-2 sm:p-4"><CardTitle className="text-base sm:text-xl">پوختە</CardTitle></CardHeader>
+                <CardContent className="p-2 sm:p-4 pt-0 sm:pt-0 space-y-1 sm:space-y-2 text-left">
+                    <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md">
+                        <span className="text-xs sm:text-sm text-muted-foreground">کۆی کاڵاکان (پێش داشکاندن):</span>
+                        <ConfidentialBlur><span className="text-sm sm:text-base font-semibold">{currencyFormatter.format(subTotalBeforeProductDiscount)}</span></ConfidentialBlur>
+                    </div>
+                    {totalProductDiscount > 0 && (
+                        <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md">
+                            <span className="text-xs sm:text-sm text-muted-foreground">داشکاندنی کاڵاکان:</span>
+                            <ConfidentialBlur><span className="text-sm sm:text-base font-semibold text-destructive">-{currencyFormatter.format(totalProductDiscount)}</span></ConfidentialBlur>
+                        </div>
+                    )}
+                    <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md">
+                        <span className="text-xs sm:text-sm text-muted-foreground">کۆی دوای داشکاندنی کاڵا:</span>
+                        <ConfidentialBlur><span className="text-sm sm:text-base font-semibold">{currencyFormatter.format(subTotal)}</span></ConfidentialBlur>
+                    </div>
+                     <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md">
+                        <span className="text-xs sm:text-sm text-muted-foreground">داشکاندنی گشتی:</span>
+                        <ConfidentialBlur><span className="text-sm sm:text-base font-semibold text-destructive">-{currencyFormatter.format(discountAmount)}</span></ConfidentialBlur>
+                    </div>
+                    <div className="flex flex-col gap-1 p-1.5 sm:p-2 rounded-md">
+                        <div className="flex items-center justify-between gap-4">
+                            <span className="text-xs sm:text-sm text-muted-foreground">تێچووی گەیاندن:</span>
+                            <ConfidentialBlur>
+                                <span className="text-sm sm:text-base font-semibold">
+                                    {deliveryCostCurrency === 'IQD' 
+                                        ? new Intl.NumberFormat('en-US').format(Number(deliveryCost) || 0) + ' IQD'
+                                        : currencyFormatter.format(Number(deliveryCost) || 0)}
+                                </span>
+                            </ConfidentialBlur>
+                        </div>
+                        {deliveryCostPayer !== 'customer' && (
+                            <span className="text-[10px] text-muted-foreground mt-1">
+                                {deliveryCostPayer === 'us' ? '(هەمووی لەلایەن ئێمەوە دراوە)' : `(لە هەردوو لاوە دراوە - بەشی کڕیار: ${deliveryCostCurrency === 'IQD' ? new Intl.NumberFormat('en-US').format(Number(deliveryCostCustomerShare) || 0) + ' IQD' : currencyFormatter.format(Number(deliveryCostCustomerShare) || 0)})`}
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md bg-secondary/80 text-base sm:text-lg">
+                        <span className="font-bold">کۆی گشتی:</span>
+                        <ConfidentialBlur><span className="font-bold">{currencyFormatter.format(totalAmount)}</span></ConfidentialBlur>
+                    </div>
+                    {paymentType === 'Installments' && (
+                        <>
+                            <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md">
+                                <span className="text-xs sm:text-sm text-muted-foreground">کۆی دراوە:</span>
+                                <ConfidentialBlur><span className="text-sm sm:text-base font-semibold text-green-500">{currencyFormatter.format(totalPaid)}</span></ConfidentialBlur>
+                            </div>
+                            <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md bg-destructive/10 text-destructive text-base sm:text-lg">
+                                <span className="font-bold">ماوە:</span>
+                                <ConfidentialBlur><span className="font-bold">{currencyFormatter.format(remainingBalance)}</span></ConfidentialBlur>
+                            </div>
+                             {overpayment > 0 && (
+                                <div className="flex items-center justify-between gap-4 p-1.5 sm:p-2 rounded-md bg-green-500/10 text-green-500 text-base sm:text-lg">
+                                    <span className="font-bold">بڕی زیادە:</span>
+                                    <ConfidentialBlur><span className="font-bold">{currencyFormatter.format(overpayment)}</span></ConfidentialBlur>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </CardContent>
+            </Card>
+        </div>
+        
+        {paymentType === 'Installments' && (
+             <Card>
+                <CardHeader className="p-3 sm:p-6 flex flex-row items-center justify-between">
+                    <CardTitle className="text-base sm:text-xl">تۆماری قیستەکان</CardTitle>
+                </CardHeader>
+                <CardContent className="p-3 sm:p-6 pt-0 sm:pt-0">
+                    {/* Desktop View */}
+                    <div className="hidden md:block">
+                        <Table>
+                            <TableHeader><TableRow><TableHead className="w-[180px] text-right">بەروار</TableHead><TableHead className="text-right">بڕ</TableHead><TableHead className="w-[120px] text-right">شێواز</TableHead><TableHead className="text-right">تێبینی</TableHead><TableHead></TableHead></TableRow></TableHeader>
+                            <TableBody>
+                                {paymentFields.map((field, index) => (
+                                <TableRow key={field.id}>
+                                    <TableCell className="align-top">
+                                        <FormField control={form.control} name={`payments.${index}.date`} render={({ field }) => ( <FormItem><FormControl><DatePicker value={field.value} onChange={field.onChange} className="w-full" /></FormControl><FormMessage/></FormItem>)}/>
+                                    </TableCell>
+                                    <TableCell className="align-top">
+                                        <FormField control={form.control} name={`payments.${index}.amount`} render={({ field }) => ( <FormItem><FormControl><Input type="number" step="any" inputMode="decimal" {...field} /></FormControl><FormMessage/></FormItem>)}/>
+                                    </TableCell>
+                                    <TableCell className="align-top">
+                                        <FormField
+                                        control={form.control}
+                                        name={`payments.${index}.method`}
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <Select onValueChange={field.onChange} value={field.value} dir="rtl">
+                                                    <FormControl>
+                                                        <SelectTrigger><SelectValue/></SelectTrigger>
+                                                    </FormControl>
+                                                    <SelectContent>
+                                                    <SelectItem value="Cash">کاش</SelectItem>
+                                                    <SelectItem value="Transfer">حەواڵە</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            <FormMessage/>
+                                            </FormItem>
+                                        )}
+                                        />
+                                    </TableCell>
+                                    <TableCell className="align-top">
+                                        <FormField control={form.control} name={`payments.${index}.note`} render={({ field }) => ( <FormItem><FormControl><Input {...field} /></FormControl><FormMessage/></FormItem>)}/>
+                                    </TableCell>
+                                    <TableCell className="align-top text-left">
+                                        <Button variant="ghost" size="icon" onClick={() => removePayment(index)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                                    </TableCell>
+                                </TableRow>
+                                ))}
+                            </TableBody>
+                        </Table>
+                    </div>
+
+                    {/* Mobile View */}
+                    <div className="space-y-4 md:hidden">
+                        {paymentFields.map((field, index) => (
+                            <Card key={field.id} className="border-accent/20">
+                                <CardHeader className="p-3 pb-2 border-b">
+                                    <div className="flex justify-between items-center">
+                                        <CardTitle className="text-sm font-bold">قیستی #{index + 1}</CardTitle>
+                                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => removePayment(index)}>
+                                            <Trash2 className="h-4 w-4 text-destructive" />
+                                        </Button>
+                                    </div>
+                                </CardHeader>
+                                <CardContent className="p-3 space-y-3">
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <FormField control={form.control} name={`payments.${index}.date`} render={({ field }) => ( 
+                                            <FormItem className="space-y-1">
+                                                <FormLabel className="text-xs">بەروار</FormLabel>
+                                                <FormControl><DatePicker value={field.value} onChange={field.onChange} className="w-full h-9 text-sm" /></FormControl>
+                                                <FormMessage className="text-[10px]"/>
+                                            </FormItem>
+                                        )}/>
+                                        <FormField control={form.control} name={`payments.${index}.amount`} render={({ field }) => ( 
+                                            <FormItem className="space-y-1">
+                                                <FormLabel className="text-xs">بڕ</FormLabel>
+                                                <FormControl><Input type="number" step="any" inputMode="decimal" className="h-9 text-sm" {...field} /></FormControl>
+                                                <FormMessage className="text-[10px]"/>
+                                            </FormItem>
+                                        )}/>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <FormField control={form.control} name={`payments.${index}.method`} render={({ field }) => (
+                                            <FormItem className="space-y-1">
+                                                <FormLabel className="text-xs">شێواز</FormLabel>
+                                                <Select onValueChange={field.onChange} value={field.value} dir="rtl">
+                                                    <FormControl><SelectTrigger className="h-9 text-sm"><SelectValue/></SelectTrigger></FormControl>
+                                                    <SelectContent>
+                                                        <SelectItem value="Cash">کاش</SelectItem>
+                                                        <SelectItem value="Transfer">حەواڵە</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                                <FormMessage className="text-[10px]"/>
+                                            </FormItem>
+                                        )}/>
+                                        <FormField control={form.control} name={`payments.${index}.note`} render={({ field }) => ( 
+                                            <FormItem className="space-y-1">
+                                                <FormLabel className="text-xs">تێبینی</FormLabel>
+                                                <FormControl><Input className="h-9 text-sm" {...field} /></FormControl>
+                                                <FormMessage className="text-[10px]"/>
+                                            </FormItem>
+                                        )}/>
+                                    </div>
+                                </CardContent>
+                            </Card>
+                        ))}
+                    </div>
+
+                    <Button type="button" variant="outline" size="sm" className="mt-4" onClick={() => appendPayment({ date: format(new Date(), 'yyyy-MM-dd'), amount: 0, method: 'Cash', note:'' })}>
+                        <PlusCircle className="mr-2 h-4 w-4" /> زیادکردنی قیست
+                    </Button>
+                </CardContent>
+             </Card>
+        )}
+
+        <div className="flex justify-end pt-4 pb-2 border-t mt-4">
+            <Button type="submit" size="lg" disabled={form.formState.isSubmitting}>
+                {form.formState.isSubmitting ? "...پاشەکەوت دەکرێت" : (formId ? "نوێکردنەوەی فۆڕم" : "پاشەکەوتکردنی فۆڕم")}
+            </Button>
+        </div>
+      </form>
+    </Form>
+  );
+}
