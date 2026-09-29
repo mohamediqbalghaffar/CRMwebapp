@@ -15,7 +15,7 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: 'CRMwebapp - BedArt Management Showcase',
+  title: 'CRMwebapp - Inventory & Sales Management Showcase',
   description: 'سیستەمی بەڕێوەبردنی کار، کۆگا، فرۆشتن و خەرجی (Showcase Mode - بێ پێویستی چوونەژوورەوە)',
   appleWebApp: {
     capable: true,

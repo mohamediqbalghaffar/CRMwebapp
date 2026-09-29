@@ -159,7 +159,7 @@ function UploadSalesFormButton({ onSave }: { onSave: () => void }) {
                 <DialogContent className="max-w-[95vw] sm:max-w-[90vw] h-[95vh] sm:h-[90vh] flex flex-col p-0 overflow-hidden" dir="rtl">
                     <DialogHeader className="flex-shrink-0 border-b">
                         <div className="text-center p-4">
-                            <DialogTitle className="text-2xl font-bold">BedArt Group</DialogTitle>
+                            <DialogTitle className="text-2xl font-bold">CRMwebapp Showcase</DialogTitle>
                             <DialogDescription className="text-sm">
                                 وردبینی زانیارییەکان بکە و پاشەکەوتی بکە.
                             </DialogDescription>
@@ -382,7 +382,7 @@ function DownloadTemplateButton() {
 
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, "Sales Template");
-        XLSX.writeFile(wb, "BedArt_Sales_Template.xlsx");
+        XLSX.writeFile(wb, "CRMwebapp_Sales_Template.xlsx");
     };
 
     return (
@@ -684,7 +684,7 @@ function SalesList() {
                                     ws['!cols'] = [{ wch: 35 }, { wch: 20 }, { wch: 15 }];
                                     const wb = XLSX.utils.book_new();
                                     XLSX.utils.book_append_sheet(wb, ws, 'Sales Template');
-                                    XLSX.writeFile(wb, 'BedArt_Sales_Template.xlsx');
+                                    XLSX.writeFile(wb, 'CRMwebapp_Sales_Template.xlsx');
                                 }}>
                                     داگرتنی نموونەی فۆڕم
                                 </DropdownMenuItem>
@@ -699,7 +699,7 @@ function SalesList() {
                 <DialogContent className="max-w-[95vw] sm:max-w-[90vw] h-[95vh] sm:h-[90vh] flex flex-col p-0 overflow-hidden" dir="rtl">
                     <DialogHeader className="flex-shrink-0 border-b">
                         <div className="text-center p-4">
-                            <DialogTitle className="text-2xl font-bold">BedArt Group</DialogTitle>
+                            <DialogTitle className="text-2xl font-bold">CRMwebapp Showcase</DialogTitle>
                             <DialogDescription className="text-sm">تەختی نوستن . دۆشەک . پشتی</DialogDescription>
                         </div>
                     </DialogHeader>
@@ -714,7 +714,7 @@ function SalesList() {
                 <DialogContent className="max-w-[95vw] sm:max-w-[90vw] h-[95vh] sm:h-[90vh] flex flex-col p-0 overflow-hidden" dir="rtl">
                     <DialogHeader className="flex-shrink-0 border-b">
                         <div className="text-center p-4">
-                            <DialogTitle className="text-2xl font-bold">BedArt Group</DialogTitle>
+                            <DialogTitle className="text-2xl font-bold">CRMwebapp Showcase</DialogTitle>
                             <DialogDescription className="text-sm">دەستکاریکردنی فۆڕم</DialogDescription>
                         </div>
                     </DialogHeader>

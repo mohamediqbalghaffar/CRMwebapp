@@ -2,9 +2,9 @@ import { MetadataRoute } from 'next'
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'BedArt Management',
-    short_name: 'BedArt',
-    description: 'Management system for BedArt Group',
+    name: 'CRMwebapp - Showcase Edition',
+    short_name: 'CRMwebapp',
+    description: 'Showcase CRM and Inventory Management System',
     start_url: '/',
     display: 'standalone',
     background_color: '#ffffff',

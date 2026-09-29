@@ -79,8 +79,7 @@ export function SidebarNav() {
       <div className="flex h-full max-h-screen flex-col gap-2">
         <div className="flex h-14 items-center justify-between border-b px-4 lg:h-[60px] lg:px-6">
           <div className="flex items-center gap-2 font-semibold">
-            <img src="/logo.png" alt="BedArt Group" className="h-9 w-auto object-contain" />
-            <span className="text-xs font-bold text-primary px-1.5 py-0.5 rounded bg-primary/10">Showcase</span>
+            <img src="/logo.png" alt="CRMwebapp" className="h-8 w-auto object-contain" />
           </div>
         </div>
         <div className="flex-1 overflow-y-auto">

@@ -71,16 +71,16 @@ export const PrintableReceipt = React.forwardRef<HTMLDivElement, PrintableReceip
             <header className="new-receipt-header">
                 <div className="header-left">
                     <div className="logo-text">
-                        <span className="logo-bed">Bed</span><span className="logo-art">Art</span> <span className="logo-group">group</span>
+                        <span className="logo-bed">CRM</span><span className="logo-art">webapp</span> <span className="logo-group">Showcase</span>
                     </div>
-                    <p className="product-categories">تەختی نوستن . دۆشەک . پشتی</p>
+                    <p className="product-categories">سیستەمی بەڕێوەبردنی فرۆشتن و کۆگا</p>
                 </div>
                 <div className="header-right">
                     <div className="phone-numbers">
-                        <p>0770 817 1818</p>
-                        <p>0770 077 1818</p>
+                        <p>0770 000 0000</p>
+                        <p>0750 000 0000</p>
                     </div>
-                     <p className="slogan">بە ئارامی بنوو، بە دڵخۆشی لە خەو هەستە.</p>
+                     <p className="slogan">سیستەمی پێشکەوتووی بەڕێوەبردنی بازرگانی</p>
                 </div>
             </header>
 

@@ -81,7 +81,7 @@ function GeneralSettings() {
                     <h3 className="font-semibold">زانیاری کۆمپانیا</h3>
                     <div className="space-y-2">
                         <label htmlFor="companyName">ناوی کۆمپانیا</label>
-                        <Input id="companyName" value={companyInfo.name} onChange={(e) => setCompanyInfo(p => ({...p, name: e.target.value}))} placeholder="BedArt Group" />
+                        <Input id="companyName" value={companyInfo.name} onChange={(e) => setCompanyInfo(p => ({...p, name: e.target.value}))} placeholder="CRMwebapp Showcase" />
                     </div>
                     <div className="space-y-2">
                         <label htmlFor="companyContact">زانیاری پەیوەندی</label>
@@ -278,7 +278,7 @@ function DataManagement() {
                 }
             }
 
-            XLSX.writeFile(workbook, 'BedArt_Backup.xlsx');
+            XLSX.writeFile(workbook, 'CRMwebapp_Backup.xlsx');
             updateToast({ title: 'سەرکەوتوو بوو', description: 'هەموو داتاکان بە سەرکەوتوویی هەناردەکران.', className: 'bg-accent text-accent-foreground' });
 
         } catch (error) {

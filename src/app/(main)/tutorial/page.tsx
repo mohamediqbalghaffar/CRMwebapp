@@ -169,7 +169,7 @@ export default function TutorialPage() {
         <div className="flex flex-col gap-6 md:gap-8 p-4 md:p-8 w-full max-w-full overflow-x-hidden" dir="rtl">
             <PageHeader 
                 title="ڕێبەری بەکارهێنانی سیستەم" 
-                description="لەم بەشەدا فێرکاری و ڕوونکردەوەی تەواو لەسەر بەش و تواناکانی سیستەمی بێدارت (BedArt) نیشان دراوە لەگەڵ نموونەی کارکردن لەسەر داتاکان." 
+                description="لەم بەشەدا فێرکاری و ڕوونکردەوەی تەواو لەسەر بەش و تواناکانی سیستەمی CRMwebapp نیشان دراوە لەگەڵ نموونەی کارکردن لەسەر داتاکان." 
             />
 
             {/* Navigation Tabs - Horizontal scrolling on mobile, grid on desktop */}

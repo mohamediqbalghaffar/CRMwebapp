@@ -20,10 +20,7 @@ export function Header() {
   return (
     <header className="sticky top-0 z-40 flex h-14 items-center justify-between gap-4 border-b bg-background px-4 sm:static sm:h-auto sm:border-0 sm:bg-transparent sm:px-6 md:hidden">
       <div className="flex items-center gap-2 font-semibold">
-        <img src="/logo.png" alt="BedArt Group" className="h-8 w-auto object-contain" />
-        <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-primary/10 text-primary border-primary/20">
-          Showcase
-        </Badge>
+        <img src="/logo.png" alt="CRMwebapp" className="h-7 w-auto object-contain" />
       </div>
       <div className="flex items-center gap-2">
         <Button
